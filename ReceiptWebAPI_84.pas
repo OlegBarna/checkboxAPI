@@ -7684,7 +7684,10 @@ var
   Command, Url: string;
   TempResponse: string;
 begin
-  Result := False;
+   // -----  НЕ ПРАЦЮЄ  !!!!!-------------
+
+
+(*  Result := False;
   Response := '';
 
   // Перевірка валідності токена
@@ -7812,9 +7815,8 @@ begin
       Log('Критичний виняток в GetCurrentCashierInfo: ' + E.Message + ' | Клас: ' + E.ClassName);
       Result := False;
     end;
-  end;
+  end; *)
 end;
 
 end.
-
 
