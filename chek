@@ -216,6 +216,9 @@ type
     FCurrentLogFileName: string;     // Поточний файл логу
 
     FIsProcessingFiscalization: Boolean; // Захист від рекурсії
+    FCashierNameFromIni: string;
+    FDepartamentFromIni: string;
+
 
     procedure InitializeLogFile;     // Новий метод для ініціалізації логу
     procedure WriteLogToFile(const AMessage: string); // Метод запису в файл
@@ -2608,6 +2611,8 @@ begin
     rbPassword.Checked := True
   else
     rbPinCode.Checked := True;
+  FCashierNameFromIni := IniPropStorage1.ReadString('CashierName', 'Тестовий касир');
+  FDepartamentFromIni := IniPropStorage1.ReadString('Departament', 'Тестовий відділ');
 
   FCurrentBalance := -1; // Початкове недійсне значення
   fseAmount.Value:=0;
@@ -5488,88 +5493,13 @@ end;
 
 
 procedure TFmChek.UpdateCashierInfo;
-var
-  Response: string;
-  JsonParser: TJSONParser;
-  JsonData, OrgData: TJSONObject;
-  CashierName, CashierId, OrganizationName: string;
 begin
-  if not Assigned(FReceiptAPI) or not FReceiptAPI.IsTokenValid then
-  begin
-    ClearCashierInfo;
-    Exit;
-  end;
-
-  try
-    if FReceiptAPI.GetCurrentCashierInfo(Response) then
-    begin
-      try
-        JsonParser := TJSONParser.Create(Response, [joUTF8]);
-        JsonData := JsonParser.Parse as TJSONObject;
-        try
-          // Основна інформація про касира
-          CashierName := JsonData.Get('full_name', 'Невідомо');
-          CashierId := JsonData.Get('id', '---');
-
-          // Інформація про організацію
-          OrganizationName := 'Невідома організація';
-          if JsonData.Find('organization') <> nil then
-          begin
-            OrgData := JsonData.Objects['organization'];
-            OrganizationName := OrgData.Get('name', 'Невідома організація');
-          end;
-
-          // Додаткові поля (якщо є)
-          // nin - ІПН
-          // key_id - номер ключа
-          // roles - ролі касира
-          // locked - чи заблокований
-          // accepted_offline_mode - чи прийняв офлайн-режим
-
-          // Оновити відображення
-          lblCashierName.Caption := 'Касир: ' + CashierName;
-          lblCashierLogin.Caption := 'Організація: ' + OrganizationName;
-          lblCashierLogin.Hint := 'ID: ' + CashierId + ' | Організація: ' + OrganizationName;
-
-          //pnlCashierInfo.Color := clMoneyGreen;
-          Log('Інформація про касира оновлена: ' + CashierName + ' (' + OrganizationName + ')');
-
-        finally
-          JsonData.Free;
-        end;
-      except
-        on E: Exception do
-        begin
-          Log('Помилка парсингу інформації касира: ' + E.Message);
-          lblCashierName.Caption := 'Касир: Дані недоступні';
-          lblCashierLogin.Caption := 'Помилка отримання даних';
-          //pnlCashierInfo.Color := clInfoBk;
-        end;
-      end;
-    end
-    else
-    begin
-      // Резервний варіант - використовуємо дані з форми
-      if PinLogin then
-      begin
-        lblCashierName.Caption := 'Касир: PIN-авторизація';
-        lblCashierLogin.Caption := 'Тип: Вхід за PIN-кодом';
-      end
-      else
-      begin
-        lblCashierName.Caption := 'Касир: ' + edtUsername.Text;
-        lblCashierLogin.Caption := 'Логін: ' + edtUsername.Text;
-      end;
-      //pnlCashierInfo.Color := clMoneyGreen;
-    end;
-
-  except
-    on E: Exception do
-    begin
-      Log('Помилка оновлення інформації касира: ' + E.Message);
-      ClearCashierInfo;
-    end;
-  end;
+    // Оновити відображення
+   lblCashierName.Caption := 'Касир: ' + FCashierNameFromIni;
+   lblCashierLogin.Caption := 'Організація: ' + FDepartamentFromIni;
+   lblCashierLogin.Hint := 'ID: ' + FCashierNameFromIni + ' | Організація: ' + FDepartamentFromIni;
+   //pnlCashierInfo.Color := clMoneyGreen;
+   Log('Інформація про касира оновлена: ' + FCashierNameFromIni + ' (' + FDepartamentFromIni + ')');
 end;
 
 procedure TFmChek.ClearCashierInfo;
