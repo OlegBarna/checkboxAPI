@@ -4285,9 +4285,10 @@ begin
   end;
 
   try
-    Command := Format('-X GET -H "Accept: application/json" -H "Authorization: Bearer %s" "%s/receipts/%s"',
+    //Command := Format('-X GET -H "Accept: application/json" -H "Authorization: Bearer %s" "%s/receipts/%s"',
+    //  [FAuthInfo.Token, FBaseURL, AReceiptId]);
+    Command := Format('-X GET -H "Accept: application/json" -H "Authorization: Bearer %s" "%s/api/v1/receipts/%s"',
       [FAuthInfo.Token, FBaseURL, AReceiptId]);
-
     Result := ExecuteCurlCommand(Command,'GetReceiptStatusCurl','GET /receipts/ReceiptID', AResponse);
 
     if Result then
