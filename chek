@@ -262,7 +262,7 @@ type
     function RetryFiscalization(Receipt: TReceipt; MaxRetries: Integer): Boolean;
     procedure ProcessPendingFiscalizations;
     function ValidateReceiptData: Boolean;
-    function IsCheckFiscalized(ChekKOD: Integer):boolean;
+    //function IsCheckFiscalized(ChekKOD: Integer):boolean;
 
     procedure MarkCheckAsPrinted(CheckID: Integer);
     procedure UpdateFiscalStatus(CheckID: Integer; Status: string;FiscalData: string = ''; ErrorText: string = '');
@@ -311,6 +311,10 @@ type
       AuthCode: string = ''; RRN: string = ''; TerminalId: string = '');
     procedure ChangePaymentType(CheckID: Integer; NewPaymentType: string;
        CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
+    procedure RefreshDatasets(CurrentCheckID: Integer);
+    function IsCheckFiscalized(CheckID: Integer): Boolean;
+    function CanModifyCheck(CheckID: Integer): Boolean;
+    function GetCurrentCheckID: Integer;
 
   public
     { public declarations }
@@ -428,8 +432,8 @@ end;
 
 procedure TFmChek.BitBtn11Click(Sender: TObject);
 begin
-  if
-     (not DMMag.QChekKod.IsNull) and (not DMMag.QNDataKod.IsNull) then
+  if not CanModifyCheck(GetCurrentCheckID) then Exit;
+  if (not DMMag.QChekKod.IsNull) and (not DMMag.QNDataKod.IsNull) then
   begin
    if MessageDlg('Дійсно хочете знищити рядок:'+#13+DMMag.QNDataNazva.AsString+' ?',mtWarning,[mbYes,mbNo,mbCancel],0)=mrYes
    then
@@ -447,8 +451,8 @@ end;
 procedure TFmChek.BitBtn12Click(Sender: TObject);
 var s:string;
 begin
-  if
-     (not DMMag.QChekKOD.IsNull) and (not DMMag.QNDataKOD.IsNull) then
+  if not CanModifyCheck(GetCurrentCheckID) then Exit;
+  if (not DMMag.QChekKOD.IsNull) and (not DMMag.QNDataKOD.IsNull) then
   begin
      DMMag.SQLQ.Active:=false;
      DMMag.SQLQ.SQL.Clear;
@@ -1028,6 +1032,7 @@ var
   dalee: boolean;
   zs, cs: integer;
 begin
+  if not CanModifyCheck(GetCurrentCheckID) then Exit;
   if (not DMMag.QChekKod.IsNull) and (schet > 0) then
   begin
     repeat
@@ -4708,11 +4713,6 @@ begin
   Result := True;
 end;
 
-function TFmChek.IsCheckFiscalized(ChekKOD: Integer):boolean;
-begin
-    result:=false;
-end;
-
 procedure TFmChek.UpdateFiscalStatus(CheckID: Integer; Status: string;
   FiscalData: string = ''; ErrorText: string = '');
 begin
@@ -5416,28 +5416,26 @@ procedure TFmChek.UpdateFiscalStatusInDB(CheckID: Integer; Status: string;
   ShiftId: string = ''; CashRegisterId: string = ''; RetryCount: Integer = -1);
 var
   WasInTransaction: Boolean;
+  CurrentCheckID: Integer; // Для збереження позиції
 begin
+  // Зберігаємо поточний ID
+  if DMMag.QChek.Active and (DMMag.QChek.RecordCount > 0) then
+    CurrentCheckID := DMMag.QChek.FieldByName('KOD').AsInteger
+  else
+    CurrentCheckID := -1;
+
   WasInTransaction := DMMag.TrMag.Active;
   if not WasInTransaction then
     DMMag.TrMag.StartTransaction;
+
   Log(Format('UpdateFiscalStatusInDB: CheckID=%d, FiscalId=%s, FiscalCode=%s, ShiftId=%s, CashRegId=%s',
       [CheckID, FiscalId, FiscalCode, ShiftId, CashRegisterId]));
+
   try
-    (*DMMag.SQLQ.SQL.Text :=
-      'UPDATE CHEK SET ' +
-      'FISCAL_STATUS = :STATUS, ' +
-      'FISCAL_RECEIPT_DATA = :FISCAL_DATA, ' +
-      'FISCAL_ERROR_TEXT = :ERROR_TEXT, ' +
-      'FISCAL_DATE = CASE WHEN :STATUS = ''DONE'' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END, ' +
-      'FISCAL_RETRY_COUNT = CASE WHEN :STATUS = ''ERROR'' THEN COALESCE(FISCAL_RETRY_COUNT, 0) + 1 ELSE FISCAL_RETRY_COUNT END, ' +
-      'FISCAL_ID = CASE WHEN :FISCAL_ID <> '''' THEN :FISCAL_ID ELSE FISCAL_ID END, ' +
-      'FISCAL_CODE = CASE WHEN :FISCAL_CODE <> '''' THEN :FISCAL_CODE ELSE FISCAL_CODE END, ' +
-      'FISCAL_SERIAL = CASE WHEN :FISCAL_SERIAL >= 0 THEN :FISCAL_SERIAL ELSE FISCAL_SERIAL END, ' +
-      'SHIFT_ID = CASE WHEN :SHIFT_ID <> '''' THEN :SHIFT_ID ELSE SHIFT_ID END, ' +
-      'CASH_REGISTER_ID = CASE WHEN :CASH_REGISTER_ID <> '''' THEN :CASH_REGISTER_ID ELSE CASH_REGISTER_ID END ' +
-      'WHERE KOD = :CHECK_ID';*)
-    Log(Format('UpdateFiscalStatusInDB: CheckID=%d, FiscalId=%s, FiscalCode=%s, ShiftId=%s, CashRegId=%s',
-        [CheckID, FiscalId, FiscalCode, ShiftId, CashRegisterId]));
+    // Вимкнути оновлення візуальних компонентів
+    DMMag.QChek.DisableControls;
+    DMMag.QnData.DisableControls;
+    DMMag.QnSer.DisableControls;
 
     DMMag.SQLQ.SQL.Text :=
     'UPDATE CHEK SET ' +
@@ -5445,15 +5443,14 @@ begin
     'FISCAL_RECEIPT_DATA = :FISCAL_DATA, ' +
     'FISCAL_ERROR_TEXT = :ERROR_TEXT, ' +
     'FISCAL_DATE = CASE WHEN :STATUS = ''DONE'' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END, ' +
-    'FISCAL_RETRY_COUNT = :RETRY_COUNT, ' +  // Завжди оновлюємо
-    'FISCAL_ID = :FISCAL_ID, ' +              // БЕЗ умов!
-    'FISCAL_CODE = :FISCAL_CODE, ' +          // БЕЗ умов!
-    'FISCAL_SERIAL = :FISCAL_SERIAL, ' +      // БЕЗ умов!
-    'SHIFT_ID = :SHIFT_ID, ' +                // БЕЗ умов!
-    'CASH_REGISTER_ID = :CASH_REGISTER_ID ' + // БЕЗ умов!
+    'FISCAL_RETRY_COUNT = :RETRY_COUNT, ' +
+    'FISCAL_ID = :FISCAL_ID, ' +
+    'FISCAL_CODE = :FISCAL_CODE, ' +
+    'FISCAL_SERIAL = :FISCAL_SERIAL, ' +
+    'SHIFT_ID = :SHIFT_ID, ' +
+    'CASH_REGISTER_ID = :CASH_REGISTER_ID ' +
     'WHERE KOD = :CHECK_ID';
 
-    // Для RetryCount передавайте явне значення
     if RetryCount = -1 then
       DMMag.SQLQ.ParamByName('RETRY_COUNT').AsInteger := 0
     else
@@ -5469,22 +5466,71 @@ begin
     DMMag.SQLQ.ParamByName('CASH_REGISTER_ID').AsString := CashRegisterId;
     DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
 
-
     DMMag.SQLQ.ExecSQL;
 
     if not WasInTransaction then
       DMMag.TrMag.Commit;
 
+    // ОНОВЛЕННЯ ДАНИХ В ГРИДІ
+    RefreshDatasets(CurrentCheckID);
+
+    //Log(Format('Успішно оновлено статус: %s для чека %d', [Status, CheckID]));
     Log(Format('Оновлено статус: %s для чека %d | Shift: %s | CashReg: %s',
         [Status, CheckID, Copy(ShiftId, 1, 8), Copy(CashRegisterId, 1, 8)]));
 
   except
     on E: Exception do
     begin
+      // Увімкнути контроли навіть при помилці
+      DMMag.QChek.EnableControls;
+      DMMag.QnData.EnableControls;
+      DMMag.QnSer.EnableControls;
+
       if not WasInTransaction then
         DMMag.TrMag.Rollback;
       Log('Помилка оновлення статусу: ' + E.Message);
+      raise; // Прокидуємо помилку далі
     end;
+  end;
+end;
+
+// НОВА процедура для оновлення даних
+procedure TFmChek.RefreshDatasets(CurrentCheckID: Integer);
+begin
+  try
+    // Оновлюємо datasets
+    if DMMag.QChek.Active then
+    begin
+      DMMag.QChek.Close;
+      DMMag.QChek.Open;
+
+      // Відновлюємо позицію
+      if CurrentCheckID > 0 then
+      begin
+        if DMMag.QChek.Locate('KOD', CurrentCheckID, []) then
+          Log('Позицію відновлено')
+        else
+          Log('Не вдалося відновити позицію');
+      end;
+    end;
+
+    // Оновлюємо пов'язані datasets
+    if DMMag.QnData.Active then
+    begin
+      DMMag.QnData.Close;
+      DMMag.QnData.Open;
+    end;
+
+    if DMMag.QnSer.Active then
+    begin
+      DMMag.QnSer.Close;
+      DMMag.QnSer.Open;
+    end;
+
+  finally
+    DMMag.QChek.EnableControls;
+    DMMag.QnData.EnableControls;
+    DMMag.QnSer.EnableControls;
   end;
 end;
 
@@ -5902,7 +5948,40 @@ begin
       [CheckID, NewPaymentType, CashAmount, CardAmount]));
 end;
 
+function TFmChek.IsCheckFiscalized(CheckID: Integer): Boolean;
+begin
+  Result := False;
+  if CheckID <= 0 then Exit;
 
+  if DMMag.QChek.Active then
+  begin
+    // Використовуємо закладку для збереження позиції
+    DMMag.QChek.DisableControls;
+    try
+      if DMMag.QChek.Locate('KOD', CheckID, []) then
+      begin
+        Result := (not DMMag.QChek.FieldByName('FISCAL_STATUS').IsNull) and
+                  (DMMag.QChek.FieldByName('FISCAL_STATUS').AsString = 'DONE');
+      end;
+    finally
+      DMMag.QChek.EnableControls;
+    end;
+  end;
+end;
+
+function TFmChek.CanModifyCheck(CheckID: Integer): Boolean;
+begin
+  Result := not IsCheckFiscalized(CheckID);
+  if not Result then
+    ShowMessage('Операція неможлива. Чек вже фіскалізований!');
+end;
+
+function TFmChek.GetCurrentCheckID: Integer;
+begin
+  Result := -1;
+  if DMMag.QChek.Active and (DMMag.QChek.RecordCount > 0) then
+    Result := DMMag.QChek.FieldByName('KOD').AsInteger;
+end;
 
 initialization
   {$I chek.lrs}
