@@ -10,7 +10,7 @@ uses
   LR_Class, LR_DBSet, LR_BarC, DKlient, DRek, dgssch, DGSer, dsch, splash,
   dsopl, otov, dndata, dvras, sprop, kredit, printers, Menus, EditBtn, dklgrupa,
   dklnt, dgtov, chekno, LCLType, ComCtrls, Spin, ReceiptWebAPI, DateUtils,
-  fpjson, jsonparser, jsonscanner,StrUtils;
+  fpjson, jsonparser, jsonscanner,StrUtils, DB;
 
 type
 
@@ -130,8 +130,12 @@ type
     Panel7: TPanel;
     Panel8: TPanel;
     Panel9: TPanel;
+    rbCard: TRadioButton;
+    rbCash: TRadioButton;
+    rgAmountType: TRadioGroup;
     rbPinCode: TRadioButton;
     rbPassword: TRadioButton;
+    lblPaymentInfo: TLabel;
     tsCash: TTabSheet;
     tsConnection: TTabSheet;
     tsLog: TTabSheet;
@@ -300,6 +304,14 @@ type
     procedure UpdateCashierInfo;
     procedure ClearCashierInfo;
 
+
+    procedure UpdatePaymentInfo(CheckID: Integer; PaymentType: string;
+      CashAmount: Double; CardAmount: Double; CardMask: string = '';
+      AuthCode: string = ''; RRN: string = ''; TerminalId: string = '');
+    procedure ChangePaymentType(CheckID: Integer; NewPaymentType: string;
+       CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
+    procedure DisplayPaymentInfo;
+
   public
     { public declarations }
   end; 
@@ -412,6 +424,7 @@ begin
      DMMag.QNData.Last;
    end;
   end else MessageDlg('Знищення неможливе!',mtError,[mbOk],0);
+  DisplayPaymentInfo; // Оновити відображення після змін
 end;
 
 procedure TFmChek.BitBtn12Click(Sender: TObject);
@@ -450,7 +463,7 @@ begin
       RstPos;
      end;
   end;
-
+  DisplayPaymentInfo; // Оновити відображення після змін
 end;
 
 // Для внесення готівки
@@ -544,24 +557,50 @@ begin
 end;
 
 procedure TFmChek.btnCreateCheckClick(Sender: TObject);
-var s:string;
+var
+  s: string;
+  CheckID: Integer;
 begin
-   if  (schet>0) then
-   begin
-      SavPos;
-      ClsCon;
-      s:='insert into chek(schet,summa,dengi,sdacha,dolg,prim,printed) '+
-          'values('+inttostr(schet)+
-          ',0,0,0,0,'+
-          #39+' '+#39+','+'0)';
-      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,s);
-      OpnCon;
-      RstPos;
-      DMMag.QChek.Last;
-   end
-   else messagedlg('Операція неможлива(рахунок/місце зберігання?) !',mtError,[mbOk],0);
+  if (schet > 0) then
+  begin
+    SavPos;
+    ClsCon;
+
+    // Створення чека з новими полями
+    s := 'insert into chek(schet,summa,dengi,sdacha,dolg,prim,printed,' +
+         'fiscal_status, payment_type, cash_amount, card_amount, created_at) ' +
+         'values(' + inttostr(schet) + ',0,0,0,0,' +
+         #39+' '+#39+','+'0,'+
+         #39+'PENDING'+#39+','+
+         #39+'CASH'+#39+','+  // Тип оплати за замовчуванням
+         '0,0,CURRENT_TIMESTAMP)';
+
+    DMMag.LaunchQuery(DMMag.SQLQ, DMMag.TrMag, s);
+
+    OpnCon;
+    RstPos;
+    DMMag.QChek.Last;
+
+    // ДОДАНО: Отримання ID створеного чека та оновлення інформації про оплату
+    CheckID := DMMag.QChekKOD.AsInteger;
+
+    // Встановити готівку за замовчуванням в інтерфейсі
+    rbCash.Checked := True;
+
+    // Оновити інформацію про оплату в БД
+    UpdatePaymentInfo(CheckID, 'CASH', 0, 0);
+
+    // Оновити відображення інформації про оплату
+    DisplayPaymentInfo;
+
+    Log('Створено новий чек ID: ' + IntToStr(CheckID));
+    Log('Встановлено тип оплати за замовчуванням: CASH');
+  end
+  else
+    messagedlg('Операція неможлива(рахунок/місце зберігання?) !', mtError, [mbOk], 0);
 end;
 
+(*
 procedure TFmChek.BitBtn10Click(Sender: TObject);
 var s,z:string; dalee:boolean;zs,cs:integer;
 begin
@@ -613,6 +652,93 @@ begin
    until not dalee;
   end else messagedlg('Спочатку відкрийте новий чек!',mtwarning,[mbok],0);
 end;
+*)
+procedure TFmChek.BitBtn10Click(Sender: TObject);
+var
+  s, z: string;
+  dalee: boolean;
+  zs, cs: integer;
+begin
+  if (not DMMag.QChekKod.IsNull) and (schet > 0) then
+  begin
+    repeat
+      FmOTov.OpenCon;
+      if FmOtov.ShowModal = mrOk then
+      begin
+        FmNData.DateEdit1.Date := Date;
+        FmNData.Label12.Caption := DMMag.QOTNAZVA.AsString;
+        FmNData.SpinEdit1.MaxValue := DMMag.QOTKOL.AsInteger;
+        FmNData.SpinEdit1.Value := 1;
+        FmNData.FloatSpinEdit2.Value := DMMag.QOTCENA.AsFloat;
+        FmNData.Label5.Caption := DMMag.QOTED.AsString;
+        FmNData.pereschet;
+        if FmNData.ShowModal = mrOk then
+        begin
+          dalee := true;
+          SavPos;
+          s := 'insert into nak_data(chek,schet,data_vv,tovar,ed,kol,cena,cena_prih,summa,summa_prih,otdel,tip,cena_sklad) values(' +
+               DMMag.QChekKOD.AsString + ',' + inttostr(schet) + ',' +
+               #39 + FormatDateTime('dd.mm.yyyy', Date) + #39 + ',' +
+               DMMag.QOTTOVAR.AsString + ',' +
+               #39 + DMMag.QOTED.AsString + #39 + ',' +
+               FmNData.SpinEdit1.Text + ',' +
+               #39 + FloatToStrF(round(FmNData.FloatSpinEdit2.Value * 1000) / 1000, ffGeneral, 10, 3, DMMag.fmt) + #39 + ',' +
+               #39 + FloatToStrF(round(DMMag.QOTCENA_PRIH.AsFloat * 100) / 100, ffGeneral, 10, 2, DMMag.fmt) + #39 + ',' +
+               FmNData.Label10.Caption + ',' +
+               FmNData.SpinEdit1.Text + '*' + FloatToStrF(round(DMMag.QOTCENA_PRIH.AsFloat * 100) / 100, ffGeneral, 10, 2, DMMag.fmt) + ',' +
+               DMMag.QOTOTDEL.AsString + ',' +
+               DMMag.QOTTIP.AsString + ',' +
+               #39 + FloatToStrF(round(FmNData.FloatSpinEdit2.Value * 1000) / 1000, ffGeneral, 10, 3, DMMag.fmt) + #39 + ')';
+          z := 'select count(s.kod) from serijnik s, prih_data p where (s.nak_data is null) and s.sklad=' + inttostr(DMMag.otdel) +
+               ' and s.prih_data=p.kod and p.tovar=' + DMMag.QOTTOVAR.AsString;
+          cs := FmNData.SpinEdit1.Value;
+          FmOTov.CloseCon;
+          ClsCon;
+          DMMag.LaunchQuery(DMMag.SQLQ, DMMag.TrMag, s);
+          zs := DMMag.Zapros('count', z);
+          OpnCon;
+          RstPos;
+          DMMag.QNData.Last;
+
+          // ДОДАНО: Оновлення інформації про оплату після додавання товару
+          if not DMMag.QChekKOD.IsNull then
+          begin
+            if rbCash.Checked then
+            begin
+              UpdatePaymentInfo(DMMag.QChekKOD.AsInteger, 'CASH',
+                               DMMag.QChekSUMMA.AsFloat, 0);
+            end
+            else if rbCard.Checked then
+            begin
+              UpdatePaymentInfo(DMMag.QChekKOD.AsInteger, 'CARD',
+                               0, DMMag.QChekSUMMA.AsFloat, '****1234');
+            end;
+
+            // Оновити відображення інформації про оплату
+            DisplayPaymentInfo;
+          end;
+
+          if zs > 0 then
+            if cs = 1 then
+              VibSer
+            else
+              messagedlg('Не забудьте вказати серійні номери.', mtinformation, [mbok], 0);
+        end
+        else
+          dalee := false;
+      end
+      else
+      begin
+        dalee := false;
+        FmOTov.CloseCon;
+      end;
+    until not dalee;
+  end
+  else
+    messagedlg('Спочатку відкрийте новий чек!', mtwarning, [mbok], 0);
+
+  DisplayPaymentInfo; // Фінальне оновлення відображення
+end;
 
 procedure TFmChek.btnCheckEraseClick(Sender: TObject);
 var nch:integer;
@@ -642,6 +768,7 @@ begin
 
    end else messagedlg('Операція неможлива! Для знищення чека потрібно повернути товар / виконані роботи.',mtError,[mbOk],0);
   end else messagedlg('Операція неможлива!',mtError,[mbOk],0);
+  DisplayPaymentInfo; // Оновити відображення після змін
 end;
 
 procedure TFmChek.SavPos;
@@ -1071,6 +1198,7 @@ begin
     OpnCon;
     RstPos;
    end;
+  DisplayPaymentInfo; // Оновити відображення після змін
 end;
 
 procedure TFmChek.btnCreateNonFiscalCheckClick(Sender: TObject);
@@ -2922,6 +3050,7 @@ begin
     Log('================================');
   end;
   CheckPendingFiscalizations;
+  DisplayPaymentInfo;
 end;
 
 
@@ -4585,7 +4714,7 @@ begin
         ShowMessage('Критична помилка: ' + E.Message);
       end;
     end;
-
+    DisplayPaymentInfo;
   finally
     if not UserCancelled then
     begin
@@ -4975,22 +5104,70 @@ end;
 
 procedure TFmChek.FillPaymentsFromDatabase(Receipt: TReceipt; CheckID: Integer);
 var
-  Payment: TPayment;
-  TotalAmount: Integer;
-  i: Integer;
+  Payment1, Payment2: TPayment;
+  CashAmount, CardAmount: Integer;
+  PaymentType, CardMask, AuthCode, RRN, TerminalId : string;
+  PaymentIndex, i : integer;
 begin
-  SetLength(Receipt.Payments, 1);
-  TotalAmount := Receipt.TotalSum;
+  SetLength(Receipt.Payments, 0);
 
-  Payment := TPayment.Create;
+  // Отримуємо дані про оплату з оновленої таблиці CHEK
+  DMMag.SQLQ.SQL.Text :=
+    'SELECT PAYMENT_TYPE, CASH_AMOUNT, CARD_AMOUNT, CARD_MASK, AUTH_CODE, RRN, TERMINAL_ID ' +
+    'FROM CHEK WHERE KOD = :CHECK_ID';
+  DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+  DMMag.SQLQ.Open;
 
-  Payment.PaymentType := ptCash;
-  Payment.LabelText := 'Готівка';
-  Payment.Code := 0;
-  Payment.Value := TotalAmount;
+  try
+    PaymentType := DMMag.SQLQ.FieldByName('PAYMENT_TYPE').AsString;
+    CashAmount := Round(DMMag.SQLQ.FieldByName('CASH_AMOUNT').AsFloat * 100);
+    CardAmount := Round(DMMag.SQLQ.FieldByName('CARD_AMOUNT').AsFloat * 100);
+    CardMask := DMMag.SQLQ.FieldByName('CARD_MASK').AsString;
+    AuthCode := DMMag.SQLQ.FieldByName('AUTH_CODE').AsString;
+    RRN := DMMag.SQLQ.FieldByName('RRN').AsString;
+    TerminalId := DMMag.SQLQ.FieldByName('TERMINAL_ID').AsString;
 
-  Receipt.Payments[0] := Payment;
+    PaymentIndex := 0;
 
+    // Обробка різних типів оплат
+    if (PaymentType = 'CASH') or (PaymentType = 'MIXED') and (CashAmount > 0) then
+    begin
+      SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+      Receipt.Payments[PaymentIndex] := FReceiptAPI.CreatePayment(ptCash, CashAmount);
+      Receipt.Payments[PaymentIndex].LabelText := 'Готівка';
+      Inc(PaymentIndex);
+
+      Log('Додано готівкову оплату: ' + FloatToStrF(CashAmount/100, ffNumber, 10, 2) + ' грн');
+    end;
+
+    if (PaymentType = 'CARD') or (PaymentType = 'MIXED') and (CardAmount > 0) then
+    begin
+      SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+
+      if TerminalId <> '' then
+      begin
+        // Оплата через термінал
+        Receipt.Payments[PaymentIndex] := FReceiptAPI.CreateCardPayment(
+          CardAmount, ppTerminal, CardMask, AuthCode, RRN);
+        Receipt.Payments[PaymentIndex].LabelText := 'Картка (термінал)';
+      end
+      else
+      begin
+        // Звичайна безготівкова оплата
+        Receipt.Payments[PaymentIndex] := FReceiptAPI.CreatePayment(ptCashless, CardAmount);
+        Receipt.Payments[PaymentIndex].LabelText := 'Безготівкова оплата';
+        Receipt.Payments[PaymentIndex].CardMask := CardMask;
+      end;
+
+      Inc(PaymentIndex);
+      Log('Додано карткову оплату: ' + FloatToStrF(CardAmount/100, ffNumber, 10, 2) + ' грн');
+    end;
+
+  finally
+    DMMag.SQLQ.Close;
+  end;
+
+  // Перевірка сум
   Receipt.TotalPayment := 0;
   for i := 0 to High(Receipt.Payments) do
   begin
@@ -5000,7 +5177,8 @@ begin
 
   Receipt.Rest := Receipt.TotalPayment - Receipt.TotalSum;
 
-  Log('Додано оплату: ' + Payment.LabelText);
+  Log('Загальна оплата: ' + FloatToStrF(Receipt.TotalPayment/100, ffNumber, 10, 2) +
+      ' грн, Решта: ' + FloatToStrF(Receipt.Rest/100, ffNumber, 10, 2) + ' грн');
 end;
 
 
@@ -5606,6 +5784,169 @@ begin
   lblCashierLogin.Caption := 'ID: ---';
   //pnlCashierInfo.Color := clInfoBk;
 end;
+
+
+procedure TFmChek.UpdatePaymentInfo(CheckID: Integer; PaymentType: string;
+  CashAmount: Double; CardAmount: Double; CardMask: string = '';
+  AuthCode: string = ''; RRN: string = ''; TerminalId: string = '');
+begin
+  try
+    DMMag.SQLQ.SQL.Text :=
+      'UPDATE CHEK SET ' +
+      'PAYMENT_TYPE = :PAYMENT_TYPE, ' +
+      'CASH_AMOUNT = :CASH_AMOUNT, ' +
+      'CARD_AMOUNT = :CARD_AMOUNT, ' +
+      'CARD_MASK = :CARD_MASK, ' +
+      'AUTH_CODE = :AUTH_CODE, ' +
+      'RRN = :RRN, ' +
+      'TERMINAL_ID = :TERMINAL_ID, ' +
+      'UPDATED_AT = CURRENT_TIMESTAMP ' +
+      'WHERE KOD = :CHECK_ID';
+
+    DMMag.SQLQ.ParamByName('PAYMENT_TYPE').AsString := PaymentType;
+    DMMag.SQLQ.ParamByName('CASH_AMOUNT').AsFloat := CashAmount;
+    DMMag.SQLQ.ParamByName('CARD_AMOUNT').AsFloat := CardAmount;
+    DMMag.SQLQ.ParamByName('CARD_MASK').AsString := CardMask;
+    DMMag.SQLQ.ParamByName('AUTH_CODE').AsString := AuthCode;
+    DMMag.SQLQ.ParamByName('RRN').AsString := RRN;
+    DMMag.SQLQ.ParamByName('TERMINAL_ID').AsString := TerminalId;
+    DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+
+    DMMag.SQLQ.ExecSQL;
+
+    Log('Оновлено інформацію про оплату для чека ' + IntToStr(CheckID) +
+        ': ' + PaymentType + ', готівка: ' + FloatToStrF(CashAmount, ffNumber, 10, 2) +
+        ', картка: ' + FloatToStrF(CardAmount, ffNumber, 10, 2));
+
+  except
+    on E: Exception do
+      Log('Помилка оновлення інформації про оплату: ' + E.Message);
+  end;
+end;
+
+
+procedure TFmChek.ChangePaymentType(CheckID: Integer; NewPaymentType: string;
+  CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
+var
+  TotalAmount, PaymentTotal: Double;
+begin
+  if not DMMag.QChek.Locate('KOD', CheckID, []) then
+  begin
+    ShowMessage('Чек не знайдено!');
+    Exit;
+  end;
+
+  TotalAmount := DMMag.QChekSUMMA.AsFloat;
+  PaymentTotal := CashAmount + CardAmount;
+
+  // Валідація відповідно до вимог Checkbox API
+  if Abs(PaymentTotal - TotalAmount) > 0.01 then
+  begin
+    ShowMessage(Format(
+      'Сума оплати (%.2f) не відповідає сумі чека (%.2f)! ' +
+      'Згідно з Checkbox API, суми повинні збігатися.',
+      [PaymentTotal, TotalAmount]));
+    Exit;
+  end;
+
+  // Перевірка коректності типу оплати
+  if (NewPaymentType <> 'CASH') and (NewPaymentType <> 'CARD') and (NewPaymentType <> 'MIXED') then
+  begin
+    ShowMessage('Невірний тип оплати. Допустимі значення: CASH, CARD, MIXED');
+    Exit;
+  end;
+
+  // Перевірка для змішаної оплати
+  if (NewPaymentType = 'MIXED') and ((CashAmount <= 0) or (CardAmount <= 0)) then
+  begin
+    ShowMessage('Для змішаної оплати обидві суми повинні бути більше 0');
+    Exit;
+  end;
+
+  // Перевірка для готівкової оплати
+  if (NewPaymentType = 'CASH') and (CardAmount > 0) then
+  begin
+    ShowMessage('Для готівкової оплати сума по картці повинна бути 0');
+    Exit;
+  end;
+
+  // Перевірка для карткової оплати
+  if (NewPaymentType = 'CARD') and (CashAmount > 0) then
+  begin
+    ShowMessage('Для карткової оплати готівкова сума повинна бути 0');
+    Exit;
+  end;
+
+  // Оновлення даних в БД
+  UpdatePaymentInfo(CheckID, NewPaymentType, CashAmount, CardAmount,
+    CardInfo, '', '', '');
+
+  // Оновити відображення
+  DisplayPaymentInfo;
+
+  Log(Format('Змінено тип оплати для чека %d: %s (Г:%.2f, К:%.2f)',
+      [CheckID, NewPaymentType, CashAmount, CardAmount]));
+end;
+
+procedure TFmChek.DisplayPaymentInfo;
+var
+  PaymentType: string;
+  CashAmount, CardAmount: Double;
+  CardMask: string;
+begin
+  if DMMag.QChek.IsEmpty or DMMag.QChekKOD.IsNull then
+  begin
+    if Assigned(lblPaymentInfo) then
+      lblPaymentInfo.Caption := 'Оплата: ---';
+    Exit;
+  end;
+
+  try
+    // Отримуємо дані з dataset
+    PaymentType := 'CASH'; // значення за замовчуванням
+    CashAmount := 0;
+    CardAmount := 0;
+    CardMask := '';
+
+    // Перевіряємо наявність полів перед доступом
+    if DMMag.QChek.FindField('PAYMENT_TYPE') <> nil then
+      PaymentType := DMMag.QChek.FieldByName('PAYMENT_TYPE').AsString;
+
+    if DMMag.QChek.FindField('CASH_AMOUNT') <> nil then
+      CashAmount := DMMag.QChek.FieldByName('CASH_AMOUNT').AsFloat;
+
+    if DMMag.QChek.FindField('CARD_AMOUNT') <> nil then
+      CardAmount := DMMag.QChek.FieldByName('CARD_AMOUNT').AsFloat;
+
+    if DMMag.QChek.FindField('CARD_MASK') <> nil then
+      CardMask := DMMag.QChek.FieldByName('CARD_MASK').AsString;
+
+    // Форматуємо відображення
+    if Assigned(lblPaymentInfo) then
+    begin
+      case PaymentType of
+        'CASH':
+          lblPaymentInfo.Caption := Format('Оплата: Готівка (%.2f грн)', [CashAmount]);
+        'CARD':
+          lblPaymentInfo.Caption := Format('Оплата: Картка (%.2f грн) %s', [CardAmount, CardMask]);
+        'MIXED':
+          lblPaymentInfo.Caption := Format('Оплата: Змішана (Г:%.2f грн, К:%.2f грн)', [CashAmount, CardAmount]);
+      else
+        lblPaymentInfo.Caption := 'Оплата: Не вказано';
+      end;
+    end;
+
+  except
+    on E: Exception do
+    begin
+      if Assigned(lblPaymentInfo) then
+        lblPaymentInfo.Caption := 'Оплата: Помилка відображення';
+      Log('Помилка в DisplayPaymentInfo: ' + E.Message);
+    end;
+  end;
+end;
+
+
 
 initialization
   {$I chek.lrs}
