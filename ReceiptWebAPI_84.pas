@@ -122,6 +122,8 @@ type
     ReturnsRoundUp: Integer;
     ReturnsRoundDown: Integer;
     CreatedAt: TDateTime;
+    DiscountsSum: Integer;    // Сума знижок (копійки)
+    ExtraChargeSum: Integer;  // Сума націнок (копійки)
     destructor Destroy; override;
   end;
 
@@ -771,6 +773,7 @@ type
     function GetCurrentShiftIdCurl(out AResponse: string): string;
     function RecoverShift(out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
     function GetZReportCurl(const AShiftId: string; out AResponse: string): Boolean;
+    function GetReportText(const AReportId: string; out AResponse: string): Boolean;
     function CloseCurrentShiftCurl(out AResponse: string;out AShiftStatus: TShiftStatus): Boolean;
     function GetShiftReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetShiftBalance(out ABalance: Integer; out AResponse: string): Boolean;
@@ -816,6 +819,9 @@ type
     function ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
 
     procedure HandleAuthState(Action: TAuthAction);
+
+    function CreateCardPayment(AValue: Integer;
+       AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
 
   end;
 
@@ -1178,7 +1184,6 @@ begin
 
   inherited Destroy;
 end;
-
 
 { TCashRegisterStatus }
 destructor TCashRegisterStatus.Destroy;
@@ -1678,8 +1683,10 @@ begin
               TempStr := PaymentObj.Get('type', '');
               if TempStr = 'CASHLESS' then
                 Payments[I].PaymentType := ptCashless
+              else if TempStr = 'CASH' then
+                Payments[I].PaymentType := ptCash
               else
-                Payments[I].PaymentType := ptCash;
+                Payments[I].PaymentType := ptCashless; // За замовчуванням
 
               Payments[I].LabelText := PaymentObj.Get('label', '');
               Payments[I].PLabel := PaymentObj.Get('label', '');
@@ -2289,6 +2296,7 @@ begin
   case APaymentType of
     ptCash: Result := 'CASH';
     ptCashless: Result := 'CASHLESS';
+    ptCard: Result := 'CASHLESS'; // Картка теж безготівка
   else
     Result := 'CASH';
   end;
@@ -4788,11 +4796,122 @@ begin
 end;
 
 function TReceiptWebAPI.ParseShiftReport(const JSONString: string; out AShiftReport: TShiftReport): Boolean;
+var
+  JsonData: TJSONObject;
+  JsonParser: TJSONParser;
+  PaymentsArray, TaxesArray: TJSONArray;
+  I: Integer;
+  PaymentObj, TaxObj: TJSONObject;
 begin
-  // TODO: Implement ParseShiftReport
   Result := False;
   AShiftReport := nil;
+
+  JsonParser := TJSONParser.Create(JSONString, [joUTF8]);
+  try
+    JsonData := JsonParser.Parse as TJSONObject;
+
+    AShiftReport := TShiftReport.Create;
+    try
+      // Основні поля звіту
+      AShiftReport.Id := JsonData.Get('id', '');
+      AShiftReport.Serial := JsonData.Get('serial', 0);
+      AShiftReport.SellReceiptsCount := JsonData.Get('sell_receipts_count', 0);
+      AShiftReport.ReturnReceiptsCount := JsonData.Get('return_receipts_count', 0);
+      AShiftReport.CashWithdrawalReceiptsCount := JsonData.Get('cash_withdrawal_receipts_count', 0);
+      AShiftReport.LastReceiptId := JsonData.Get('last_receipt_id', '');
+      AShiftReport.Initial := JsonData.Get('initial', 0);
+      AShiftReport.Balance := JsonData.Get('balance', 0);
+      AShiftReport.SalesRoundUp := JsonData.Get('sales_round_up', 0);
+      AShiftReport.SalesRoundDown := JsonData.Get('sales_round_down', 0);
+      AShiftReport.ReturnsRoundUp := JsonData.Get('returns_round_up', 0);
+      AShiftReport.ReturnsRoundDown := JsonData.Get('returns_round_down', 0);
+      AShiftReport.CreatedAt := ParseDateTime(JsonData.Get('created_at', ''));
+      AShiftReport.DiscountsSum := JsonData.Get('discounts_sum', 0);
+      AShiftReport.ExtraChargeSum := JsonData.Get('extra_charge_sum', 0);
+
+      // Парсимо платежі
+      if (JsonData.Find('payments') <> nil) and
+         (JsonData.Items[JsonData.IndexOfName('payments')].JSONType = jtArray) then
+      begin
+        PaymentsArray := JsonData.Arrays['payments'];
+        if Assigned(PaymentsArray) then
+        begin
+          SetLength(AShiftReport.Payments, PaymentsArray.Count);
+          for I := 0 to PaymentsArray.Count - 1 do
+          begin
+            if PaymentsArray.Items[I].JSONType = jtObject then
+            begin
+              PaymentObj := PaymentsArray.Objects[I];
+              AShiftReport.Payments[I] := TShiftPayment.Create;
+
+              AShiftReport.Payments[I].PaymentType := PaymentObj.Get('type', '');
+              AShiftReport.Payments[I].ProviderType := PaymentObj.Get('provider_type', '');
+              AShiftReport.Payments[I].Code := PaymentObj.Get('code', 0);
+              AShiftReport.Payments[I].LabelText := PaymentObj.Get('label', '');
+              AShiftReport.Payments[I].SellSum := PaymentObj.Get('sell_sum', 0);
+              AShiftReport.Payments[I].ReturnSum := PaymentObj.Get('return_sum', 0);
+              AShiftReport.Payments[I].ServiceIn := PaymentObj.Get('service_in', 0);
+              AShiftReport.Payments[I].ServiceOut := PaymentObj.Get('service_out', 0);
+              AShiftReport.Payments[I].CashWithdrawal := PaymentObj.Get('cash_withdrawal', 0);
+              AShiftReport.Payments[I].CashWithdrawalCommission := PaymentObj.Get('cash_withdrawal_commission', 0);
+            end;
+          end;
+        end;
+      end;
+
+      // Парсимо податки
+      if (JsonData.Find('taxes') <> nil) and
+         (JsonData.Items[JsonData.IndexOfName('taxes')].JSONType = jtArray) then
+      begin
+        TaxesArray := JsonData.Arrays['taxes'];
+        if Assigned(TaxesArray) then
+        begin
+          SetLength(AShiftReport.Taxes, TaxesArray.Count);
+          for I := 0 to TaxesArray.Count - 1 do
+          begin
+            if TaxesArray.Items[I].JSONType = jtObject then
+            begin
+              TaxObj := TaxesArray.Objects[I];
+              AShiftReport.Taxes[I] := TShiftTax.Create;
+
+              AShiftReport.Taxes[I].Id := TaxObj.Get('id', '');
+              AShiftReport.Taxes[I].Code := TaxObj.Get('code', 0);
+              AShiftReport.Taxes[I].LabelText := TaxObj.Get('label', '');
+              AShiftReport.Taxes[I].Symbol := TaxObj.Get('symbol', '');
+              AShiftReport.Taxes[I].Rate := TaxObj.Get('rate', 0.0);
+              AShiftReport.Taxes[I].SellSum := TaxObj.Get('sell_sum', 0);
+              AShiftReport.Taxes[I].ReturnSum := TaxObj.Get('return_sum', 0);
+              AShiftReport.Taxes[I].SalesTurnover := TaxObj.Get('sales_turnover', 0);
+              AShiftReport.Taxes[I].ReturnsTurnover := TaxObj.Get('returns_turnover', 0);
+              AShiftReport.Taxes[I].NoVat := TaxObj.Get('no_vat', False);
+              AShiftReport.Taxes[I].AdvancedCode := TaxObj.Get('advanced_code', '');
+              AShiftReport.Taxes[I].SetupDate := ParseDateTime(TaxObj.Get('setup_date', ''));
+            end;
+          end;
+        end;
+      end;
+
+      Result := True;
+
+    except
+      on E: Exception do
+      begin
+        FreeAndNil(AShiftReport);
+        Log('ParseShiftReport: Помилка парсингу звіту: ' + E.Message);
+        Result := False;
+      end;
+    end;
+
+  except
+    on E: Exception do
+    begin
+      Log('ParseShiftReport: Помилка парсингу JSON: ' + E.Message);
+      Result := False;
+    end;
+  end;
 end;
+
+
 
 function TReceiptWebAPI.ParseAPIError(const JSONString: string; out AError: TAPIError): Boolean;
 begin
@@ -6138,11 +6257,6 @@ function TReceiptWebAPI.GetShiftZReportCurl(const AShiftId: string;
   out AResponse: string; out AShiftReport: TShiftReport): Boolean;
 var
   Command: string;
-  JsonParser: TJSONParser;
-  JsonData: TJSONObject;
-  PaymentsArray, TaxesArray: TJSONArray;
-  I: Integer;
-  PaymentObj, TaxObj: TJSONObject;
 begin
   Result := False;
   AShiftReport := nil;
@@ -6150,7 +6264,6 @@ begin
 
   if not IsTokenValid then
   begin
-    // ЄДИНИЙ спосіб отримати новий токен - повторний логін
     if not LoginCurl(FUsername, FPassword, AResponse) then
     begin
       Log('Потрібен повторний вхід: ' + AResponse);
@@ -6159,131 +6272,27 @@ begin
   end;
 
   try
-
-
-    // Цей ендпоінт правильний, але перевіряємо чи передається правильний AShiftId
+    // ВИПРАВЛЕНО: Z-звіт теж через /api/v1/reports, але для закритої зміни
+    // У реальності Z-звіт створюється автоматично при закритті зміни
     Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" ' +
                      '-H "X-Client-Version: %s" -H "Authorization: Bearer %s" ' +
                      '"%s/api/v1/shifts/%s/z-report"',
       [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, AShiftId]);
 
     Log('GetShiftZReportCurl: Виконуємо команду: curl ' + Command);
-    Result := ExecuteCurlCommand(Command,'GetShiftZReportCurl','GET /api/v1/shifts/ShiftID/z-report', AResponse);
+    Result := ExecuteCurlCommand(Command, 'GetShiftZReportCurl', 'GET /api/v1/shifts/ShiftID/z-report', AResponse);
 
     if Result then
     begin
-      // Перевіряємо наявність помилок
-      if CheckResponseForErrors(AResponse) then
-      begin
-        Log('GetShiftReportCurl: Сервер повернув помилку: ' + AResponse);
-        Result := False;
-        Exit;
-      end;
-
-      // Парсимо відповідь
-      JsonParser := TJSONParser.Create(AResponse, [joUTF8]);
-      try
-        JsonData := JsonParser.Parse as TJSONObject;
-
-        AShiftReport := TShiftReport.Create;
-        try
-          // Основні поля звіту
-          AShiftReport.Id := JsonData.Get('id', '');
-          AShiftReport.Serial := JsonData.Get('serial', 0);
-          AShiftReport.SellReceiptsCount := JsonData.Get('sell_receipts_count', 0);
-          AShiftReport.ReturnReceiptsCount := JsonData.Get('return_receipts_count', 0);
-          AShiftReport.CashWithdrawalReceiptsCount := JsonData.Get('cash_withdrawal_receipts_count', 0);
-          AShiftReport.LastReceiptId := JsonData.Get('last_receipt_id', '');
-          AShiftReport.Initial := JsonData.Get('initial', 0);
-          AShiftReport.Balance := JsonData.Get('balance', 0);
-          AShiftReport.SalesRoundUp := JsonData.Get('sales_round_up', 0);
-          AShiftReport.SalesRoundDown := JsonData.Get('sales_round_down', 0);
-          AShiftReport.ReturnsRoundUp := JsonData.Get('returns_round_up', 0);
-          AShiftReport.ReturnsRoundDown := JsonData.Get('returns_round_down', 0);
-          AShiftReport.CreatedAt := ParseDateTime(JsonData.Get('created_at', ''));
-
-          // Парсимо платежі
-          PaymentsArray := JsonData.Arrays['payments'];
-          if Assigned(PaymentsArray) then
-          begin
-            SetLength(AShiftReport.Payments, PaymentsArray.Count);
-            for I := 0 to PaymentsArray.Count - 1 do
-            begin
-              PaymentObj := PaymentsArray.Objects[I];
-              AShiftReport.Payments[I] := TShiftPayment.Create;
-
-              AShiftReport.Payments[I].PaymentType := PaymentObj.Get('type', '');
-              AShiftReport.Payments[I].ProviderType := PaymentObj.Get('provider_type', '');
-              AShiftReport.Payments[I].Code := PaymentObj.Get('code', 0);
-              AShiftReport.Payments[I].LabelText := PaymentObj.Get('label', '');
-              AShiftReport.Payments[I].SellSum := PaymentObj.Get('sell_sum', 0);
-              AShiftReport.Payments[I].ReturnSum := PaymentObj.Get('return_sum', 0);
-              AShiftReport.Payments[I].ServiceIn := PaymentObj.Get('service_in', 0);
-              AShiftReport.Payments[I].ServiceOut := PaymentObj.Get('service_out', 0);
-              AShiftReport.Payments[I].CashWithdrawal := PaymentObj.Get('cash_withdrawal', 0);
-              AShiftReport.Payments[I].CashWithdrawalCommission := PaymentObj.Get('cash_withdrawal_commission', 0);
-            end;
-          end;
-
-          // Парсимо податки
-          TaxesArray := JsonData.Arrays['taxes'];
-          if Assigned(TaxesArray) then
-          begin
-            SetLength(AShiftReport.Taxes, TaxesArray.Count);
-            for I := 0 to TaxesArray.Count - 1 do
-            begin
-              TaxObj := TaxesArray.Objects[I];
-              AShiftReport.Taxes[I] := TShiftTax.Create;
-
-              AShiftReport.Taxes[I].Id := TaxObj.Get('id', '');
-              AShiftReport.Taxes[I].Code := TaxObj.Get('code', 0);
-              AShiftReport.Taxes[I].LabelText := TaxObj.Get('label', '');
-              AShiftReport.Taxes[I].Symbol := TaxObj.Get('symbol', '');
-              AShiftReport.Taxes[I].Rate := TaxObj.Get('rate', 0.0);
-              AShiftReport.Taxes[I].ExtraRate := TaxObj.Get('extra_rate', 0.0);
-              AShiftReport.Taxes[I].SellSum := TaxObj.Get('sell_sum', 0);
-              AShiftReport.Taxes[I].ReturnSum := TaxObj.Get('return_sum', 0);
-              AShiftReport.Taxes[I].SalesTurnover := TaxObj.Get('sales_turnover', 0);
-              AShiftReport.Taxes[I].ReturnsTurnover := TaxObj.Get('returns_turnover', 0);
-              AShiftReport.Taxes[I].SetupDate := ParseDateTime(TaxObj.Get('setup_date', ''));
-              AShiftReport.Taxes[I].Included := TaxObj.Get('included', False);
-              AShiftReport.Taxes[I].NoVat := TaxObj.Get('no_vat', False);
-              AShiftReport.Taxes[I].AdvancedCode := TaxObj.Get('advanced_code', '');
-              AShiftReport.Taxes[I].Sales := TaxObj.Get('sales', 0.0);
-              AShiftReport.Taxes[I].Returns := TaxObj.Get('returns', 0.0);
-              AShiftReport.Taxes[I].TaxSum := TaxObj.Get('value', 0.0);
-              AShiftReport.Taxes[I].ExtraTaxSum := TaxObj.Get('extra_value', 0.0);
-            end;
-          end;
-
-          Log('GetShiftReportCurl: Z-звіт успішно отримано. Баланс: ' +
-              FloatToStrF(AShiftReport.Balance / 100, ffNumber, 10, 2) + ' грн');
-
-          Result := True;
-
-        except
-          on E: Exception do
-          begin
-            FreeAndNil(AShiftReport);
-            Log('GetShiftReportCurl: Помилка парсингу звіту: ' + E.Message);
-            Result := False;
-          end;
-        end;
-
-      finally
-        JsonData.Free;
-      end;
-    end
-    else
-    begin
-      Log('GetShiftReportCurl: Помилка виконання curl команди: ' + AResponse);
+      // Для Z-звіту використовуємо той же парсер, що і для X-звіту
+      Result := ParseShiftReport(AResponse, AShiftReport);
     end;
 
   except
     on E: Exception do
     begin
       AResponse := 'CURL command error: ' + E.Message;
-      Log('GetShiftReportCurl: Виняток: ' + E.Message);
+      Log('GetShiftZReportCurl: Виняток: ' + E.Message);
       Result := False;
     end;
   end;
@@ -6306,40 +6315,29 @@ begin
 
   if not IsTokenValid then
   begin
-    // ЄДИНИЙ спосіб отримати новий токен - повторний логін
     if not LoginCurl(FUsername, FPassword, AResponse) then
     begin
       Log('Потрібен повторний вхід: ' + AResponse);
       Exit;
     end;
   end;
-    // Перевіряємо чи встановлено ID каси
-  if FCurrentCashRegisterId = '' then
-  begin
-    AResponse := 'Cash register ID not set';
-    Log('GetShiftXReportCurl: ' + AResponse);
-    Exit;
-  end;
 
   try
-
-    // ВИПРАВЛЕНИЙ ЕНДПОІНТ - використовуємо shifts
-    Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" ' +
+    // ВИПРАВЛЕНО: Використовуємо правильний ендпоінт для X-звіту
+    Command := Format('-X POST -H "Accept: application/json" -H "X-Client-Name: %s" ' +
                      '-H "X-Client-Version: %s" -H "Authorization: Bearer %s" ' +
-                     '"%s/api/v1/shifts/%s/x-report"',
-      [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, AShiftId]);
+                     '"%s/api/v1/reports"',
+      [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL]);
 
     Log('GetShiftXReportCurl: Виконуємо команду: curl ' + Command);
-    Result := ExecuteCurlCommand(Command,'GetShiftXReportCurl','GET /api/v1/shifts/ShiftID/x-report', AResponse);
-
-
+    Result := ExecuteCurlCommand(Command, 'GetShiftXReportCurl', 'POST /api/v1/reports', AResponse);
 
     if Result then
     begin
       // Перевіряємо наявність помилок
       if CheckResponseForErrors(AResponse) then
       begin
-        Log('GetXReportCurl: Сервер повернув помилку: ' + AResponse);
+        Log('GetShiftXReportCurl: Сервер повернув помилку: ' + AResponse);
         Result := False;
         Exit;
       end;
@@ -6351,7 +6349,7 @@ begin
 
         AShiftReport := TShiftReport.Create;
         try
-          // Основні поля звіту (аналогічно Z-звіту)
+          // Основні поля звіту згідно документації
           AShiftReport.Id := JsonData.Get('id', '');
           AShiftReport.Serial := JsonData.Get('serial', 0);
           AShiftReport.SellReceiptsCount := JsonData.Get('sell_receipts_count', 0);
@@ -6366,70 +6364,89 @@ begin
           AShiftReport.ReturnsRoundDown := JsonData.Get('returns_round_down', 0);
           AShiftReport.CreatedAt := ParseDateTime(JsonData.Get('created_at', ''));
 
-          // Парсимо платежі
-          PaymentsArray := JsonData.Arrays['payments'];
-          if Assigned(PaymentsArray) then
-          begin
-            SetLength(AShiftReport.Payments, PaymentsArray.Count);
-            for I := 0 to PaymentsArray.Count - 1 do
-            begin
-              PaymentObj := PaymentsArray.Objects[I];
-              AShiftReport.Payments[I] := TShiftPayment.Create;
+          // Нові поля згідно документації
+          AShiftReport.DiscountsSum := JsonData.Get('discounts_sum', 0);
+          AShiftReport.ExtraChargeSum := JsonData.Get('extra_charge_sum', 0);
 
-              AShiftReport.Payments[I].PaymentType := PaymentObj.Get('type', '');
-              AShiftReport.Payments[I].ProviderType := PaymentObj.Get('provider_type', '');
-              AShiftReport.Payments[I].Code := PaymentObj.Get('code', 0);
-              AShiftReport.Payments[I].LabelText := PaymentObj.Get('label', '');
-              AShiftReport.Payments[I].SellSum := PaymentObj.Get('sell_sum', 0);
-              AShiftReport.Payments[I].ReturnSum := PaymentObj.Get('return_sum', 0);
-              AShiftReport.Payments[I].ServiceIn := PaymentObj.Get('service_in', 0);
-              AShiftReport.Payments[I].ServiceOut := PaymentObj.Get('service_out', 0);
-              AShiftReport.Payments[I].CashWithdrawal := PaymentObj.Get('cash_withdrawal', 0);
-              AShiftReport.Payments[I].CashWithdrawalCommission := PaymentObj.Get('cash_withdrawal_commission', 0);
+          // Парсимо платежі
+          if (JsonData.Find('payments') <> nil) and
+             (JsonData.Items[JsonData.IndexOfName('payments')].JSONType = jtArray) then
+          begin
+            PaymentsArray := JsonData.Arrays['payments'];
+            if Assigned(PaymentsArray) then
+            begin
+              SetLength(AShiftReport.Payments, PaymentsArray.Count);
+              for I := 0 to PaymentsArray.Count - 1 do
+              begin
+                if PaymentsArray.Items[I].JSONType = jtObject then
+                begin
+                  PaymentObj := PaymentsArray.Objects[I];
+                  AShiftReport.Payments[I] := TShiftPayment.Create;
+
+                  AShiftReport.Payments[I].PaymentType := PaymentObj.Get('type', '');
+                  AShiftReport.Payments[I].ProviderType := PaymentObj.Get('provider_type', '');
+                  AShiftReport.Payments[I].Code := PaymentObj.Get('code', 0);
+                  AShiftReport.Payments[I].LabelText := PaymentObj.Get('label', '');
+                  AShiftReport.Payments[I].SellSum := PaymentObj.Get('sell_sum', 0);
+                  AShiftReport.Payments[I].ReturnSum := PaymentObj.Get('return_sum', 0);
+                  AShiftReport.Payments[I].ServiceIn := PaymentObj.Get('service_in', 0);
+                  AShiftReport.Payments[I].ServiceOut := PaymentObj.Get('service_out', 0);
+                  AShiftReport.Payments[I].CashWithdrawal := PaymentObj.Get('cash_withdrawal', 0);
+                  AShiftReport.Payments[I].CashWithdrawalCommission := PaymentObj.Get('cash_withdrawal_commission', 0);
+                end;
+              end;
             end;
+          end
+          else
+          begin
+            SetLength(AShiftReport.Payments, 0);
           end;
 
           // Парсимо податки
-          TaxesArray := JsonData.Arrays['taxes'];
-          if Assigned(TaxesArray) then
+          if (JsonData.Find('taxes') <> nil) and
+             (JsonData.Items[JsonData.IndexOfName('taxes')].JSONType = jtArray) then
           begin
-            SetLength(AShiftReport.Taxes, TaxesArray.Count);
-            for I := 0 to TaxesArray.Count - 1 do
+            TaxesArray := JsonData.Arrays['taxes'];
+            if Assigned(TaxesArray) then
             begin
-              TaxObj := TaxesArray.Objects[I];
-              AShiftReport.Taxes[I] := TShiftTax.Create;
+              SetLength(AShiftReport.Taxes, TaxesArray.Count);
+              for I := 0 to TaxesArray.Count - 1 do
+              begin
+                if TaxesArray.Items[I].JSONType = jtObject then
+                begin
+                  TaxObj := TaxesArray.Objects[I];
+                  AShiftReport.Taxes[I] := TShiftTax.Create;
 
-              AShiftReport.Taxes[I].Id := TaxObj.Get('id', '');
-              AShiftReport.Taxes[I].Code := TaxObj.Get('code', 0);
-              AShiftReport.Taxes[I].LabelText := TaxObj.Get('label', '');
-              AShiftReport.Taxes[I].Symbol := TaxObj.Get('symbol', '');
-              AShiftReport.Taxes[I].Rate := TaxObj.Get('rate', 0.0);
-              AShiftReport.Taxes[I].ExtraRate := TaxObj.Get('extra_rate', 0.0);
-              AShiftReport.Taxes[I].SellSum := TaxObj.Get('sell_sum', 0);
-              AShiftReport.Taxes[I].ReturnSum := TaxObj.Get('return_sum', 0);
-              AShiftReport.Taxes[I].SalesTurnover := TaxObj.Get('sales_turnover', 0);
-              AShiftReport.Taxes[I].ReturnsTurnover := TaxObj.Get('returns_turnover', 0);
-              AShiftReport.Taxes[I].SetupDate := ParseDateTime(TaxObj.Get('setup_date', ''));
-              AShiftReport.Taxes[I].Included := TaxObj.Get('included', False);
-              AShiftReport.Taxes[I].NoVat := TaxObj.Get('no_vat', False);
-              AShiftReport.Taxes[I].AdvancedCode := TaxObj.Get('advanced_code', '');
-              AShiftReport.Taxes[I].Sales := TaxObj.Get('sales', 0.0);
-              AShiftReport.Taxes[I].Returns := TaxObj.Get('returns', 0.0);
-              AShiftReport.Taxes[I].TaxSum := TaxObj.Get('value', 0.0);
-              AShiftReport.Taxes[I].ExtraTaxSum := TaxObj.Get('extra_value', 0.0);
+                  // Основні поля податку
+                  AShiftReport.Taxes[I].Id := TaxObj.Get('id', '');
+                  AShiftReport.Taxes[I].Code := TaxObj.Get('code', 0);
+                  AShiftReport.Taxes[I].LabelText := TaxObj.Get('label', '');
+                  AShiftReport.Taxes[I].Symbol := TaxObj.Get('symbol', '');
+                  AShiftReport.Taxes[I].Rate := TaxObj.Get('rate', 0.0);
+                  AShiftReport.Taxes[I].SellSum := TaxObj.Get('sell_sum', 0);
+                  AShiftReport.Taxes[I].ReturnSum := TaxObj.Get('return_sum', 0);
+                  AShiftReport.Taxes[I].SalesTurnover := TaxObj.Get('sales_turnover', 0);
+                  AShiftReport.Taxes[I].ReturnsTurnover := TaxObj.Get('returns_turnover', 0);
+                  AShiftReport.Taxes[I].NoVat := TaxObj.Get('no_vat', False);
+                  AShiftReport.Taxes[I].AdvancedCode := TaxObj.Get('advanced_code', '');
+                  AShiftReport.Taxes[I].SetupDate := ParseDateTime(TaxObj.Get('setup_date', ''));
+                end;
+              end;
             end;
+          end
+          else
+          begin
+            SetLength(AShiftReport.Taxes, 0);
           end;
 
-          Log('GetXReportCurl: X-звіт успішно отримано. Баланс: ' +
-              FloatToStrF(AShiftReport.Balance / 100, ffNumber, 10, 2) + ' грн');
-
+          Log('GetShiftXReportCurl: X-звіт успішно отримано. ID: ' + AShiftReport.Id);
           Result := True;
 
         except
           on E: Exception do
           begin
+            Log('GetShiftXReportCurl: Помилка парсингу звіту: ' + E.Message);
             FreeAndNil(AShiftReport);
-            Log('GetXReportCurl: Помилка парсингу звіту: ' + E.Message);
             Result := False;
           end;
         end;
@@ -6440,7 +6457,7 @@ begin
     end
     else
     begin
-      Log('GetXReportCurl: Помилка виконання curl команди: ' + AResponse);
+      Log('GetShiftXReportCurl: Помилка виконання запиту: ' + AResponse);
     end;
 
   except
@@ -6452,7 +6469,6 @@ begin
     end;
   end;
 end;
-
 
 
 function TReceiptWebAPI.GetCurrentBalance(out AResponse: string): Integer;
@@ -7489,7 +7505,7 @@ begin
   Result := (APrice * ATaxRate) / (100 + ATaxRate);
 end;
 
-function TReceiptWebAPI.ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
+(*function TReceiptWebAPI.ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
 var
   I: Integer;
   TotalGoodsSum, TotalPaymentsSum: Integer;
@@ -7587,6 +7603,312 @@ begin
   end;
 
   Result := True;
+end; *)
+
+function TReceiptWebAPI.ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
+var
+  I, J, TotalPayment, TotalGoodsSum: Integer;
+  Good: TGoodItem;
+  Payment: TPayment;
+begin
+  Result := False;
+  AError := '';
+
+  // Базові перевірки наявності об'єкта
+  if not Assigned(AReceipt) then
+  begin
+    AError := 'Чек не ініціалізовано';
+    Exit;
+  end;
+
+  // Перевірка обов'язкових полів
+  if AReceipt.Id = '' then
+  begin
+    AError := 'ID чека є обовʼязковим полем';
+    Exit;
+  end;
+
+  if not IsValidUUID(AReceipt.Id) then
+  begin
+    AError := 'ID чека має бути у форматі UUID v4';
+    Exit;
+  end;
+
+  if AReceipt.CashierName = '' then
+  begin
+    AError := 'Імʼя касира є обовʼязковим полем';
+    Exit;
+  end;
+
+  if AReceipt.Departament = '' then
+  begin
+    AError := 'Відділ є обовʼязковим полем';
+    Exit;
+  end;
+
+  // Перевірка товарів
+  if Length(AReceipt.Goods) = 0 then
+  begin
+    AError := 'Чек повинен містити хоча б один товар';
+    Exit;
+  end;
+
+  TotalGoodsSum := 0;
+  for I := 0 to High(AReceipt.Goods) do
+  begin
+    Good := AReceipt.Goods[I];
+    if not Assigned(Good) then
+    begin
+      AError := Format('Товар #%d не ініціалізовано', [I + 1]);
+      Exit;
+    end;
+
+    if not Assigned(Good.Good) then
+    begin
+      AError := Format('Обʼєкт товару #%d не ініціалізовано', [I + 1]);
+      Exit;
+    end;
+
+    // Перевірка обов'язкових полей товару
+    if Good.Good.Code = '' then
+    begin
+      AError := Format('Код товару #%d є обовʼязковим', [I + 1]);
+      Exit;
+    end;
+
+    if Good.Good.Name = '' then
+    begin
+      AError := Format('Назва товару #%d є обовʼязковою', [I + 1]);
+      Exit;
+    end;
+
+    if Good.Good.Price <= 0 then
+    begin
+      AError := Format('Ціна товару #%d повинна бути більше 0', [I + 1]);
+      Exit;
+    end;
+
+    if Good.Quantity <= 0 then
+    begin
+      AError := Format('Кількість товару #%d повинна бути більше 0', [I + 1]);
+      Exit;
+    end;
+
+    if Good.Sum <= 0 then
+    begin
+      AError := Format('Сума товару #%d повинна бути більше 0', [I + 1]);
+      Exit;
+    end;
+
+    // Перевірка узгодженості ціни та кількості
+    if Good.Sum <> (Good.Good.Price * Good.Quantity) div 1000 then
+    begin
+      AError := Format('Неузгодженість ціни та кількості для товару #%d', [I + 1]);
+      Exit;
+    end;
+
+    // Додаємо до загальної суми товарів
+    TotalGoodsSum := TotalGoodsSum + Good.Sum;
+  end;
+
+  // Перевірка платежів
+  if Length(AReceipt.Payments) = 0 then
+  begin
+    AError := 'Чек повинен містити хоча б один платіж';
+    Exit;
+  end;
+
+  TotalPayment := 0;
+  for I := 0 to High(AReceipt.Payments) do
+  begin
+    Payment := AReceipt.Payments[I];
+    if not Assigned(Payment) then
+    begin
+      AError := Format('Платіж #%d не ініціалізовано', [I + 1]);
+      Exit;
+    end;
+
+    if Payment.Value <= 0 then
+    begin
+      AError := Format('Сума платежу #%d повинна бути більше 0', [I + 1]);
+      Exit;
+    end;
+
+    // Перевірка типів оплати
+    case Payment.PaymentType of
+      ptCash, ptCashless, ptCard:
+        begin
+          // Валідні типи
+        end;
+    else
+      AError := Format('Невідомий тип оплати для платежу #%d', [I + 1]);
+      Exit;
+    end;
+
+    // Специфічні перевірки для карткових платежів
+    if Payment.PaymentType = ptCard then
+    begin
+      if Payment.ProviderType = '' then
+      begin
+        AError := Format('Для карткових платежів обовʼязково вказувати ProviderType (платіж #%d)', [I + 1]);
+        Exit;
+      end;
+
+      // Перевірка валідності провайдера
+      if (Payment.ProviderType <> 'BANK') and
+         (Payment.ProviderType <> 'TAPXPHONE') and
+         (Payment.ProviderType <> 'POSCONTROL') and
+         (Payment.ProviderType <> 'TERMINAL') then
+      begin
+        AError := Format('Невідомий провайдер оплати: %s (платіж #%d)',
+          [Payment.ProviderType, I + 1]);
+        Exit;
+      end;
+    end;
+
+    // Перевірка міток оплати
+    if Payment.LabelText = '' then
+    begin
+      case Payment.PaymentType of
+        ptCash: Payment.LabelText := 'Готівка';
+        ptCashless: Payment.LabelText := 'Безготівковий розрахунок';
+        ptCard: Payment.LabelText := 'Банківська картка';
+      end;
+    end;
+
+    // Додаємо до загальної суми платежів
+    TotalPayment := TotalPayment + Payment.Value;
+  end;
+
+  // Перевірка відповідності сум товарів та платежів
+  if TotalGoodsSum <> AReceipt.TotalSum then
+  begin
+    AError := Format('Сума товарів (%d) не відповідає загальній сумі чека (%d)',
+      [TotalGoodsSum, AReceipt.TotalSum]);
+    Exit;
+  end;
+
+  if TotalPayment <> AReceipt.TotalPayment then
+  begin
+    AError := Format('Сума платежів (%d) не відповідає загальній оплаті (%d)',
+      [TotalPayment, AReceipt.TotalPayment]);
+    Exit;
+  end;
+
+  if AReceipt.TotalSum <> AReceipt.TotalPayment then
+  begin
+    AError := Format('Загальна сума (%d) не відповідає загальній оплаті (%d)',
+      [AReceipt.TotalSum, AReceipt.TotalPayment]);
+    Exit;
+  end;
+
+  // Перевірка знижок
+  for I := 0 to High(AReceipt.Discounts) do
+  begin
+    if Assigned(AReceipt.Discounts[I]) then
+    begin
+      if AReceipt.Discounts[I].Value <= 0 then
+      begin
+        AError := Format('Значення знижки #%d повинно бути більше 0', [I + 1]);
+        Exit;
+      end;
+
+      if AReceipt.Discounts[I].Sum <= 0 then
+      begin
+        AError := Format('Сума знижки #%d повинна бути більше 0', [I + 1]);
+        Exit;
+      end;
+    end;
+  end;
+
+  // Перевірка бонусів
+  for I := 0 to High(AReceipt.Bonuses) do
+  begin
+    if Assigned(AReceipt.Bonuses[I]) then
+    begin
+      if AReceipt.Bonuses[I].BonusCard = '' then
+      begin
+        AError := Format('Бонусна карта #%d повинна мати номер', [I + 1]);
+        Exit;
+      end;
+
+      if AReceipt.Bonuses[I].Value <= 0 then
+      begin
+        AError := Format('Значення бонусу #%d повинно бути більше 0', [I + 1]);
+        Exit;
+      end;
+    end;
+  end;
+
+  // Перевірка податків
+  for I := 0 to High(AReceipt.Taxes) do
+  begin
+    if Assigned(AReceipt.Taxes[I]) then
+    begin
+      if AReceipt.Taxes[I].Code <= 0 then
+      begin
+        AError := Format('Код податку #%d повинен бути більше 0', [I + 1]);
+        Exit;
+      end;
+
+      if AReceipt.Taxes[I].Rate < 0 then
+      begin
+        AError := Format('Ставка податку #%d не може бути відʼємною', [I + 1]);
+        Exit;
+      end;
+    end;
+  end;
+
+  // Перевірка службових операцій
+  for I := 0 to High(AReceipt.ServiceOperations) do
+  begin
+    if Assigned(AReceipt.ServiceOperations[I]) then
+    begin
+      if AReceipt.ServiceOperations[I].OperationType = '' then
+      begin
+        AError := Format('Тип службової операції #%d є обовʼязковим', [I + 1]);
+        Exit;
+      end;
+
+      if AReceipt.ServiceOperations[I].Amount <= 0 then
+      begin
+        AError := Format('Сума службової операції #%d повинна бути більше 0', [I + 1]);
+        Exit;
+      end;
+    end;
+  end;
+
+  // Перевірка підписів
+  for I := 0 to High(AReceipt.Signatures) do
+  begin
+    if Assigned(AReceipt.Signatures[I]) then
+    begin
+      if AReceipt.Signatures[I].SignatureType = '' then
+      begin
+        AError := Format('Тип підпису #%d є обовʼязковим', [I + 1]);
+        Exit;
+      end;
+
+      if AReceipt.Signatures[I].Value = '' then
+      begin
+        AError := Format('Значення підпису #%d є обовʼязковим', [I + 1]);
+        Exit;
+      end;
+    end;
+  end;
+
+  // Додаткова перевірка для офлайн-режиму
+  if AReceipt.IsOffline then
+  begin
+    if AReceipt.OfflineSequenceNumber <= 0 then
+    begin
+      AError := 'Для офлайн-чека обовʼязковий OfflineSequenceNumber > 0';
+      Exit;
+    end;
+  end;
+
+  Result := True;
+  Log('Валідація чека пройдена успішно: ' + AReceipt.Id);
 end;
 
 function TReceiptWebAPI.IsNetworkError(const AResponse: string): Boolean;
@@ -7817,6 +8139,54 @@ begin
       Result := False;
     end;
   end; *)
+end;
+
+function TReceiptWebAPI.CreateCardPayment(AValue: Integer;
+  AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
+begin
+  Result := TPayment.Create;
+  Result.PaymentType := ptCard;
+  Result.Value := AValue;
+  Result.ProviderType := PaymentProviderToString(AProvider);
+  Result.LabelText := 'Банківська картка';
+  Result.Code := 2; // Код для безготівкових оплат
+  Result.CardMask := ACardMask;
+  Result.AuthCode := AAuthCode;
+  Result.RRN := ARRN;
+end;
+
+function TReceiptWebAPI.GetReportText(const AReportId: string; out AResponse: string): Boolean;
+var
+  Command: string;
+begin
+  Result := False;
+  AResponse := '';
+
+  if not IsTokenValid then
+  begin
+    if not LoginCurl(FUsername, FPassword, AResponse) then
+    begin
+      Log('Потрібен повторний вхід: ' + AResponse);
+      Exit;
+    end;
+  end;
+
+  try
+    Command := Format('-X GET -H "Accept: text/plain" -H "X-Client-Name: %s" ' +
+                     '-H "X-Client-Version: %s" -H "Authorization: Bearer %s" ' +
+                     '"%s/api/v1/reports/%s/txt"',
+      [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, AReportId]);
+
+    Result := ExecuteCurlCommand(Command, 'GetReportText', 'GET /api/v1/reports/ReportID/txt', AResponse);
+
+  except
+    on E: Exception do
+    begin
+      AResponse := 'CURL command error: ' + E.Message;
+      Log('GetReportText: Виняток: ' + E.Message);
+      Result := False;
+    end;
+  end;
 end;
 
 end.
