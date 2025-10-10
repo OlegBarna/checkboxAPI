@@ -52,6 +52,7 @@ type
     btnPinCodeLogin: TButton;
     btnRefreshCashRegisters: TButton;
     btnSelectCashRegister: TButton;
+    btnGetXReport: TButton;
     chkPreferTestCashRegister: TCheckBox;
     chkUseCheckboxAPI: TCheckBox;
     chkSkipClientNameCheck: TCheckBox;
@@ -163,6 +164,7 @@ type
     procedure btnForsedShiftCloseClick(Sender: TObject);
     procedure btnGetCashRegisterStatusCurlClick(Sender: TObject);
     procedure btnGetShiftStatusCurlClick(Sender: TObject);
+    procedure btnGetXReportClick(Sender: TObject);
     procedure btnGoOfflineClick(Sender: TObject);
     procedure btnGoOnlineClick(Sender: TObject);
     procedure btnInitializeCashRegisterClick(Sender: TObject);
@@ -2641,6 +2643,123 @@ begin
 
   if Assigned(ShiftStatus) then
     FreeAndNil(ShiftStatus);
+end;
+
+procedure TFmChek.btnGetXReportClick(Sender: TObject);
+var
+  LResponse: string;
+  LShiftReport: TShiftReport;
+  I: integer;
+begin
+  // ВИПРАВЛЕННЯ: Для X-звіту не потрібен ShiftId - він створюється для поточної відкритої зміни
+  // Отримуємо Х-звіт через API
+  if FReceiptAPI.GetShiftXReportCurl('', LResponse, LShiftReport) then // Порожній ShiftId - для поточної зміни
+  begin
+    try
+      // Виводимо основні дані звіту
+      Log('=== Х-ЗВІТ ===');
+      Log('ID звіту: ' + LShiftReport.Id);
+      Log('Серійний номер: ' + IntToStr(LShiftReport.Serial));
+      Log('Чеків продажу: ' + IntToStr(LShiftReport.SellReceiptsCount));
+      Log('Чеків повернення: ' + IntToStr(LShiftReport.ReturnReceiptsCount));
+      Log('Чеків видачі готівки: ' + IntToStr(LShiftReport.CashWithdrawalReceiptsCount));
+      Log('Початкова сума: ' + FloatToStr(LShiftReport.Initial / 100) + ' грн');
+      Log('Баланс: ' + FloatToStr(LShiftReport.Balance / 100) + ' грн');
+      Log('Останній ID чека: ' + LShiftReport.LastReceiptId);
+      Log('Округлення продажів у більшу сторону: ' + FloatToStr(LShiftReport.SalesRoundUp / 100) + ' грн');
+      Log('Округлення продажів у меншу сторону: ' + FloatToStr(LShiftReport.SalesRoundDown / 100) + ' грн');
+      Log('Округлення повернень у більшу сторону: ' + FloatToStr(LShiftReport.ReturnsRoundUp / 100) + ' грн');
+      Log('Округлення повернень у меншу сторону: ' + FloatToStr(LShiftReport.ReturnsRoundDown / 100) + ' грн');
+
+      // ВИПРАВЛЕННЯ: Додаємо нові поля згідно документації
+      Log('Сума знижок: ' + FloatToStr(LShiftReport.DiscountsSum / 100) + ' грн');
+      Log('Сума націнок: ' + FloatToStr(LShiftReport.ExtraChargeSum / 100) + ' грн');
+
+      Log('Дата створення: ' + DateTimeToStr(LShiftReport.CreatedAt));
+
+      // Виводимо інформацію про платежі
+      if Length(LShiftReport.Payments) > 0 then
+      begin
+        Log('--- ПЛАТЕЖІ ---');
+        for I := 0 to High(LShiftReport.Payments) do
+        begin
+          Log('Платіж ' + IntToStr(I+1) + ':');
+          Log('  Тип: ' + LShiftReport.Payments[I].PaymentType);
+          Log('  Постачальник: ' + LShiftReport.Payments[I].ProviderType);
+          Log('  Код: ' + IntToStr(LShiftReport.Payments[I].Code));
+          Log('  Назва: ' + LShiftReport.Payments[I].LabelText);
+          Log('  Сума продажів: ' + FloatToStr(LShiftReport.Payments[I].SellSum / 100) + ' грн');
+          Log('  Сума повернень: ' + FloatToStr(LShiftReport.Payments[I].ReturnSum / 100) + ' грн');
+          Log('  Service In: ' + FloatToStr(LShiftReport.Payments[I].ServiceIn / 100) + ' грн');
+          Log('  Service Out: ' + FloatToStr(LShiftReport.Payments[I].ServiceOut / 100) + ' грн');
+          Log('  Видача готівки: ' + FloatToStr(LShiftReport.Payments[I].CashWithdrawal / 100) + ' грн');
+          Log('  Комісія видачі: ' + FloatToStr(LShiftReport.Payments[I].CashWithdrawalCommission / 100) + ' грн');
+        end;
+      end
+      else
+      begin
+        Log('--- ПЛАТЕЖІ: Немає даних ---');
+      end;
+
+      // Виводимо інформацію про податки
+      if Length(LShiftReport.Taxes) > 0 then
+      begin
+        Log('--- ПОДАТКИ ---');
+        for I := 0 to High(LShiftReport.Taxes) do
+        begin
+          Log('Податок ' + IntToStr(I+1) + ':');
+          Log('  ID: ' + LShiftReport.Taxes[I].Id);
+          Log('  Код: ' + IntToStr(LShiftReport.Taxes[I].Code));
+          Log('  Назва: ' + LShiftReport.Taxes[I].LabelText);
+          Log('  Символ: ' + LShiftReport.Taxes[I].Symbol);
+          Log('  Ставка: ' + FloatToStr(LShiftReport.Taxes[I].Rate) + '%');
+
+          // ВИПРАВЛЕННЯ: Деякі поля можуть бути відсутні в X-звіті
+          // Log('  Додаткова ставка: ' + FloatToStr(LShiftReport.Taxes[I].ExtraRate) + '%'); // Може бути 0
+
+          Log('  Сума продажів: ' + FloatToStr(LShiftReport.Taxes[I].SellSum / 100) + ' грн');
+          Log('  Сума повернень: ' + FloatToStr(LShiftReport.Taxes[I].ReturnSum / 100) + ' грн');
+          Log('  Оборот продажів: ' + FloatToStr(LShiftReport.Taxes[I].SalesTurnover / 100) + ' грн');
+          Log('  Оборот повернень: ' + FloatToStr(LShiftReport.Taxes[I].ReturnsTurnover / 100) + ' грн');
+
+          // ВИПРАВЛЕННЯ: Ці поля можуть бути відсутні в X-звіті
+          // Log('  Сума податку: ' + FloatToStr(LShiftReport.Taxes[I].TaxSum / 100) + ' грн');
+          // Log('  Додаткова сума податку: ' + FloatToStr(LShiftReport.Taxes[I].ExtraTaxSum / 100) + ' грн');
+          // Log('  Включено: ' + BoolToStr(LShiftReport.Taxes[I].Included, True));
+
+          Log('  Без ПДВ: ' + BoolToStr(LShiftReport.Taxes[I].NoVat, True));
+          Log('  Розширений код: ' + LShiftReport.Taxes[I].AdvancedCode);
+          Log('  Дата налаштування: ' + DateTimeToStr(LShiftReport.Taxes[I].SetupDate));
+        end;
+      end
+      else
+      begin
+        Log('--- ПОДАТКИ: Немає даних ---');
+      end;
+
+      Log('=== КІНЕЦЬ Х-ЗВІТУ ===');
+
+      // ВИПРАВЛЕННЯ: Додатково можна отримати текстову версію звіту
+      if FReceiptAPI.GetReportText(LShiftReport.Id, LResponse) then
+      begin
+        Log('--- ТЕКСТОВА ВЕРСІЯ ЗВІТУ ---');
+        Log(LResponse);
+        Log('--- КІНЕЦЬ ТЕКСТОВОЇ ВЕРСІЇ ---');
+      end;
+
+    finally
+      if Assigned(LShiftReport) then
+        LShiftReport.Free; // Не забуваємо звільнити пам'ять
+    end;
+  end
+  else
+  begin
+    Log('Помилка отримання Х-звіту: ' + LResponse);
+
+    // ВИПРАВЛЕННЯ: Додаткова інформація для налагодження
+    if Pos('зміна не відкрита', LResponse) > 0 then
+      Log('Перевірте, чи відкрита зміна для отримання X-звіту');
+  end;
 end;
 
 procedure TFmChek.btnGoOfflineClick(Sender: TObject);
