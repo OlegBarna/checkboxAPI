@@ -653,6 +653,9 @@ type
     FClientName: string;
     FClientVersion: string;
     FLicenseKey: string;
+    FLastError: string; // Додаємо поле для помилок
+    FReceiptsDirectory: string;
+    FTempDirectory: string;
     //FAuthToken: string; // Для зворотньої сумісності
     FAuthInfo: TAuthInfo;
     FUsername: string;
@@ -712,6 +715,9 @@ type
     function BuildJsonDataCorrected(AReceipt: TReceipt): TJSONObject;
     function IsNetworkError(const AResponse: string): Boolean;
 
+
+    //function GetTempDirectory: string;
+
   public
     constructor Create(ABaseURL, AClientName, AClientVersion, ALicenseKey: string;
       ALogProcedure: TLogProcedure = nil);
@@ -728,6 +734,11 @@ type
     property CurrentCashRegisterId: string read FCurrentCashRegisterId write FCurrentCashRegisterId;
     property CurrentBalance: Integer read FCurrentBalance write FCurrentBalance;
     property BalanceUpdateInterval: Integer read FBalanceUpdateInterval write FBalanceUpdateInterval;
+    property LastError: string read FLastError;
+    property ReceiptsDirectory: string read FReceiptsDirectory write FReceiptsDirectory;
+    property TempDirectory: string read FTempDirectory write FTempDirectory;
+
+    //function GetReceiptsDirectory: string;
 
     function GenerateUUID: string;
     function IsValidUUID(const UUID: string): Boolean;
@@ -822,6 +833,18 @@ type
 
     function CreateCardPayment(AValue: Integer;
        AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
+
+    
+
+    // Нові методи для візуалізації через curl
+    function GetReceiptHTML(const AReceiptId: string; out AHTMLContent: string): Boolean;
+    function GetReceiptPNG(const AReceiptId: string; out AFileName: string;
+      const AWidth: Integer = 0; const APaperWidth: Integer = 0;
+      const AQRCodeScale: Integer = 0): Boolean;
+    function GetReceiptText(const AReceiptId: string; out ATextContent: string): Boolean;
+    function GetReceiptQRCode(const AReceiptId: string; out AFileName: string): Boolean;
+
+
 
   end;
 
@@ -1383,6 +1406,10 @@ begin
   FClientVersion := AClientVersion;
   FLicenseKey := ALicenseKey;
   FLogProcedure := ALogProcedure;
+
+  FLastError := '';
+  FReceiptsDirectory := GetUserDir + 'checkbox_receipts/'; // Значення за замовчуванням
+  FTempDirectory := GetUserDir + 'temp_receipts/'; // Значення за замовчуванням
 
   FUsername := '';
   FPassword := '';
@@ -8188,6 +8215,212 @@ begin
     end;
   end;
 end;
+
+
+
+
+
+function TReceiptWebAPI.GetReceiptHTML(const AReceiptId: string; out AHTMLContent: string): Boolean;
+var
+  LCommand: string;
+  LOutputFile: string;
+  LFile: TStringList;
+  LResponse: string;
+begin
+  Result := False;
+  AHTMLContent := '';
+
+  LOutputFile := IncludeTrailingPathDelimiter(FTempDirectory) + 'receipt_' + AReceiptId + '_' + IntToStr(GetTickCount) + '.html';
+
+  // Формуємо curl команду для Linux
+  LCommand := '-X ''GET'' ' +
+              '''https://api.checkbox.ua/api/v1/receipts/' + AReceiptId + '/html'' ' +
+              '-H ''accept: text/html'' ' +
+              '-H ''X-Client-Name: ' + FClientName + ''' ' +
+              '-H ''X-Client-Version: ' + FClientVersion + ''' ' +
+              '-o "' + LOutputFile + '"';
+
+  try
+    if ExecuteCurlCommand(LCommand, 'GetReceiptHTML', '/receipts/' + AReceiptId + '/html', LResponse) then
+    begin
+      // Читаємо отриманий HTML файл
+      if FileExists(LOutputFile) then
+      begin
+        LFile := TStringList.Create;
+        try
+          LFile.LoadFromFile(LOutputFile);
+          AHTMLContent := LFile.Text;
+          Result := True;
+        finally
+          LFile.Free;
+        end;
+        DeleteFile(LOutputFile); // Видаляємо тимчасовий файл
+      end;
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання HTML: ' + E.Message;
+    end;
+  end;
+end;
+
+function TReceiptWebAPI.GetReceiptPNG(const AReceiptId: string; out AFileName: string;
+  const AWidth: Integer = 0; const APaperWidth: Integer = 0;
+  const AQRCodeScale: Integer = 0): Boolean;
+var
+  LCommand: string;
+  LParams: string;
+  LResponse: string;
+begin
+  Result := False;
+  AFileName := '';
+
+  // Формуємо параметри
+  LParams := '';
+  if AWidth > 0 then
+    LParams := LParams + 'width=' + IntToStr(AWidth);
+  if APaperWidth > 0 then
+  begin
+    if LParams <> '' then LParams := LParams + '&';
+    LParams := LParams + 'paper_width=' + IntToStr(APaperWidth);
+  end;
+  if AQRCodeScale > 0 then
+  begin
+    if LParams <> '' then LParams := LParams + '&';
+    LParams := LParams + 'qrcode_scale=' + IntToStr(AQRCodeScale);
+  end;
+
+  // Створюємо унікальне ім'я файлу для Linux
+  AFileName := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'receipt_' + AReceiptId + '_' + IntToStr(GetTickCount) + '.png';
+
+  // Формуємо curl команду для Linux
+  LCommand := '-X ''GET'' ' +
+              '''https://api.checkbox.ua/api/v1/receipts/' + AReceiptId + '/png';
+  if LParams <> '' then
+    LCommand := LCommand + '?' + LParams;
+  LCommand := LCommand + ''' ' +
+              '-H ''accept: image/png'' ' +
+              '-H ''X-Client-Name: ' + FClientName + ''' ' +
+              '-H ''X-Client-Version: ' + FClientVersion + ''' ' +
+              '--output "' + AFileName + '"';
+
+  try
+    Result := ExecuteCurlCommand(LCommand, 'GetReceiptPNG', '/receipts/' + AReceiptId + '/png', LResponse);
+    if Result then
+    begin
+      if not FileExists(AFileName) then
+      begin
+        Result := False;
+        FLastError := 'Файл PNG не було створено';
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: ' + LResponse;
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання PNG: ' + E.Message;
+      Result := False;
+    end;
+  end;
+end;
+
+function TReceiptWebAPI.GetReceiptText(const AReceiptId: string; out ATextContent: string): Boolean;
+var
+  LCommand: string;
+  LOutputFile: string;
+  LFile: TStringList;
+  LResponse: string;
+begin
+  Result := False;
+  ATextContent := '';
+
+  LOutputFile := IncludeTrailingPathDelimiter(FTempDirectory) + 'receipt_' + AReceiptId + '_' + IntToStr(GetTickCount) + '.txt';
+
+  // Формуємо curl команду для Linux
+  LCommand := '-X ''GET'' ' +
+              '''https://api.checkbox.ua/api/v1/receipts/' + AReceiptId + '/text'' ' +
+              '-H ''accept: text/plain'' ' +
+              '-H ''X-Client-Name: ' + FClientName + ''' ' +
+              '-H ''X-Client-Version: ' + FClientVersion + ''' ' +
+              '-o "' + LOutputFile + '"';
+
+  try
+    if ExecuteCurlCommand(LCommand, 'GetReceiptText', '/receipts/' + AReceiptId + '/text', LResponse) then
+    begin
+      // Читаємо отриманий текстовий файл
+      if FileExists(LOutputFile) then
+      begin
+        LFile := TStringList.Create;
+        try
+          LFile.LoadFromFile(LOutputFile);
+          ATextContent := LFile.Text;
+          Result := True;
+        finally
+          LFile.Free;
+        end;
+        DeleteFile(LOutputFile); // Видаляємо тимчасовий файл
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: ' + LResponse;
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання тексту: ' + E.Message;
+    end;
+  end;
+end;
+
+function TReceiptWebAPI.GetReceiptQRCode(const AReceiptId: string; out AFileName: string): Boolean;
+var
+  LCommand: string;
+  LResponse: string;
+begin
+  Result := False;
+  AFileName := '';
+
+  // Створюємо унікальне ім'я файлу для Linux
+  AFileName := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'receipt_' + AReceiptId + '_qrcode_' + IntToStr(GetTickCount) + '.png';
+
+  // Формуємо curl команду для Linux
+  LCommand := '-X ''GET'' ' +
+              '''https://api.checkbox.ua/api/v1/receipts/' + AReceiptId + '/qrcode'' ' +
+              '-H ''accept: image/png'' ' +
+              '-H ''X-Client-Name: ' + FClientName + ''' ' +
+              '-H ''X-Client-Version: ' + FClientVersion + ''' ' +
+              '-o "' + AFileName + '"';
+
+  try
+    Result := ExecuteCurlCommand(LCommand, 'GetReceiptQRCode', '/receipts/' + AReceiptId + '/qrcode', LResponse);
+    if Result then
+    begin
+      if not FileExists(AFileName) then
+      begin
+        Result := False;
+        FLastError := 'Файл QR-коду не було створено';
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: ' + LResponse;
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання QR-коду: ' + E.Message;
+      Result := False;
+    end;
+  end;
+end;
+
+
+
 
 end.
 
