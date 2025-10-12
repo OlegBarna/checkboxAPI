@@ -208,6 +208,8 @@ type
     datavv,nomer,psvid,nalkod,pnazva,pnazshort:string;
     reppath:string;
     logpath:string;
+    receiptspath:String;
+    temppath:string;
     level,createlogs:boolean;
     pchek,pndata:integer;
     FCurrentBalance: Integer;
@@ -317,6 +319,7 @@ type
     function IsCheckFiscalized(CheckID: Integer): Boolean;
     function CanModifyCheck(CheckID: Integer): Boolean;
     function GetCurrentCheckID: Integer;
+    procedure SaveStringToFile(const AFileName, AContent: string);
 
   public
     { public declarations }
@@ -502,10 +505,20 @@ var
   i: Integer;
   UserCancelled: Boolean;
   CurrentRetryCount: Integer;
+  // ДОДАНІ ЗМІННІ ДЛЯ ВІЗУАЛІЗАЦІЇ
+  LHTMLContent: string;
+  LPNGFileName: string;
+  LQRCodeFileName: string;
+  LTextContent: string;
 begin
   Receipt := nil;
   ReceiptResponse := nil;
   UserCancelled := False;
+  // ІНІЦІАЛІЗАЦІЯ НОВИХ ЗМІННИХ
+  LHTMLContent := '';
+  LPNGFileName := '';
+  LQRCodeFileName := '';
+  LTextContent := '';
 
   if FIsProcessingFiscalization then
   begin
@@ -560,6 +573,28 @@ begin
     else
     begin
       Log('Зʼєднання з інтернетом перевірено успішно');
+    end;
+
+    FReceiptAPI.ReceiptsDirectory := receiptspath; // Встановлюємо директорію
+    FReceiptAPI.TempDirectory := temppath; // Встановлюємо директорію
+
+    // Перевірити та створити директорії
+    if not DirectoryExists(FReceiptAPI.ReceiptsDirectory) then
+    begin
+      if not ForceDirectories(FReceiptAPI.ReceiptsDirectory) then
+      begin
+        Log('❌ Не вдалося створити директорію для чеків: ' + FReceiptAPI.ReceiptsDirectory);
+        Exit;
+      end;
+    end;
+
+    if not DirectoryExists(FReceiptAPI.TempDirectory) then
+    begin
+      if not ForceDirectories(FReceiptAPI.TempDirectory) then
+      begin
+        Log('❌ Не вдалося створити тимчасову директорію: ' + FReceiptAPI.TempDirectory);
+        Exit;
+      end;
     end;
 
     if not DMMag.QChekFISCAL_STATUS.IsNull and
@@ -764,7 +799,68 @@ begin
         Log('Початковий статус: ' + ReceiptStatusToString(ReceiptResponse.Status));
         Log('Фіскальний номер: ' + ReceiptResponse.FiscalCode);
 
+        // ВИПРАВЛЕННЯ: ВИКЛИКАТИ HandleSuccessfulFiscalization ПЕРШИМ
+        // Ця функція чекає поки чек отримає статус DONE
         HandleSuccessfulFiscalization(CheckID, Receipt, ReceiptResponse);
+
+        // ТЕПЕР ОТРИМУЄМО ВІЗУАЛІЗАЦІЮ ПОСЛЯ ФІСКАЛІЗАЦІЇ
+        Log('=== ПОЧАТОК ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ЧЕКА ===');
+
+        Log('Перевірка директорій:');
+        Log('ReceiptsDirectory: ' + FReceiptAPI.ReceiptsDirectory);
+        Log('TempDirectory: ' + FReceiptAPI.TempDirectory);
+        Log('Directory exists: ' + BoolToStr(DirectoryExists(FReceiptAPI.ReceiptsDirectory), True));
+
+        // 1. Отримуємо PNG зображення
+        Log('Отримання PNG зображення чека...');
+        if FReceiptAPI.GetReceiptPNG(ReceiptResponse.Id, LPNGFileName, 30, 58, 75) then
+        begin
+          Log('✓ PNG зображення отримано: ' + ExtractFileName(LPNGFileName));
+          // Файл автоматично зберігається за шляхом LPNGFileName
+        end
+        else
+        begin
+          Log('✗ Помилка отримання PNG: ' + FReceiptAPI.LastError);
+        end;
+
+        // 2. Отримуємо QR-код
+        Log('Отримання QR-коду...');
+        if FReceiptAPI.GetReceiptQRCode(ReceiptResponse.Id, LQRCodeFileName) then
+        begin
+          Log('✓ QR-код отримано: ' + ExtractFileName(LQRCodeFileName));
+          // Файл автоматично зберігається за шляхом LQRCodeFileName
+        end
+        else
+        begin
+          Log('✗ Помилка отримання QR-коду: ' + FReceiptAPI.LastError);
+        end;
+
+        // 3. Отримуємо HTML представлення
+        Log('Отримання HTML представлення...');
+        if FReceiptAPI.GetReceiptHTML(ReceiptResponse.Id, LHTMLContent) then
+        begin
+          Log('✓ HTML представлення отримано');
+          // Зберігаємо HTML у файл
+          SaveStringToFile(FReceiptAPI.ReceiptsDirectory + 'receipt_' + ReceiptResponse.Id + '.html', LHTMLContent);
+        end
+        else
+        begin
+          Log('✗ Помилка отримання HTML: ' + FReceiptAPI.LastError);
+        end;
+
+        // 4. Отримуємо текстове представлення
+        Log('Отримання текстового представлення...');
+        if FReceiptAPI.GetReceiptText(ReceiptResponse.Id, LTextContent) then
+        begin
+          Log('✓ Текстове представлення отримано');
+          SaveStringToFile(FReceiptAPI.ReceiptsDirectory + 'receipt_' + ReceiptResponse.Id + '.txt', LTextContent);
+        end
+        else
+        begin
+          Log('✗ Помилка отримання тексту: ' + FReceiptAPI.LastError);
+        end;
+
+        Log('=== ЗАВЕРШЕННЯ ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ===');
       end
       else
       begin
@@ -2649,7 +2745,99 @@ procedure TFmChek.btnGetXReportClick(Sender: TObject);
 var
   LResponse: string;
   LShiftReport: TShiftReport;
-  I: integer;
+  LTextReport: string;
+  LReportFile: string;
+  LPngFileName: string;
+  I: Integer; // Додано оголошення змінної I
+
+  // Функція повинна бути оголошена перед використанням
+  function GenerateXReportText(LShiftReport: TShiftReport): string;
+  var
+    J: Integer; // Використовуємо іншу змінну для уникнення конфлікту
+    LText: TStringList;
+  begin
+    LText := TStringList.Create;
+    try
+      // Заголовок
+      LText.Add('═══════════════════════════════════════════════════');
+      LText.Add('                   Х-ЗВІТ');
+      LText.Add('═══════════════════════════════════════════════════');
+      LText.Add('');
+
+      // Основна інформація
+      LText.Add('▸ ID звіту: ' + LShiftReport.Id);
+      LText.Add('▸ Серійний номер: ' + IntToStr(LShiftReport.Serial));
+      LText.Add('▸ Час створення: ' + DateTimeToStr(LShiftReport.CreatedAt));
+      LText.Add('');
+
+      // Статистика чеків
+      LText.Add('────────────── СТАТИСТИКА ЧЕКІВ ──────────────');
+      LText.Add('Чеків продажу:        ' + IntToStr(LShiftReport.SellReceiptsCount));
+      LText.Add('Чеків повернення:     ' + IntToStr(LShiftReport.ReturnReceiptsCount));
+      LText.Add('Чеків видачі готівки: ' + IntToStr(LShiftReport.CashWithdrawalReceiptsCount));
+      LText.Add('');
+
+      // Фінансові підсумки
+      LText.Add('───────────────── ФІНАНСИ ───────────────────');
+      LText.Add('Початкова сума:       ' + FormatFloat('0.00', LShiftReport.Initial / 100) + ' грн');
+      LText.Add('Кінцевий баланс:      ' + FormatFloat('0.00', LShiftReport.Balance / 100) + ' грн');
+      LText.Add('Сума знижок:          ' + FormatFloat('0.00', LShiftReport.DiscountsSum / 100) + ' грн');
+      LText.Add('Сума націнок:         ' + FormatFloat('0.00', LShiftReport.ExtraChargeSum / 100) + ' грн');
+      LText.Add('');
+
+      // Округлення
+      LText.Add('──────────────── ОКРУГЛЕННЯ ─────────────────');
+      LText.Add('Продажі (вгору):      ' + FormatFloat('0.00', LShiftReport.SalesRoundUp / 100) + ' грн');
+      LText.Add('Продажі (вниз):       ' + FormatFloat('0.00', LShiftReport.SalesRoundDown / 100) + ' грн');
+      LText.Add('Повернення (вгору):   ' + FormatFloat('0.00', LShiftReport.ReturnsRoundUp / 100) + ' грн');
+      LText.Add('Повернення (вниз):    ' + FormatFloat('0.00', LShiftReport.ReturnsRoundDown / 100) + ' грн');
+      LText.Add('');
+
+      // Платежі
+      if Length(LShiftReport.Payments) > 0 then
+      begin
+        LText.Add('───────────────── ПЛАТЕЖІ ───────────────────');
+        for J := 0 to High(LShiftReport.Payments) do
+        begin
+          LText.Add('● ' + LShiftReport.Payments[J].LabelText + ':');
+          LText.Add('  Продажі:    ' + FormatFloat('0.00', LShiftReport.Payments[J].SellSum / 100) + ' грн');
+          LText.Add('  Повернення: ' + FormatFloat('0.00', LShiftReport.Payments[J].ReturnSum / 100) + ' грн');
+          if LShiftReport.Payments[J].ServiceIn > 0 then
+            LText.Add('  Service In: ' + FormatFloat('0.00', LShiftReport.Payments[J].ServiceIn / 100) + ' грн');
+          if LShiftReport.Payments[J].ServiceOut > 0 then
+            LText.Add('  Service Out:' + FormatFloat('0.00', LShiftReport.Payments[J].ServiceOut / 100) + ' грн');
+          LText.Add('');
+        end;
+      end;
+
+      // Податки
+      if Length(LShiftReport.Taxes) > 0 then
+      begin
+        LText.Add('───────────────── ПОДАТКИ ───────────────────');
+        for J := 0 to High(LShiftReport.Taxes) do
+        begin
+          if (LShiftReport.Taxes[J].SalesTurnover > 0) or (LShiftReport.Taxes[J].ReturnsTurnover > 0) then
+          begin
+            LText.Add('● ' + LShiftReport.Taxes[J].LabelText + ' (' + LShiftReport.Taxes[J].Symbol + '):');
+            LText.Add('  Ставка:     ' + FormatFloat('0.0', LShiftReport.Taxes[J].Rate) + '%');
+            LText.Add('  Оборот:     ' + FormatFloat('0.00', LShiftReport.Taxes[J].SalesTurnover / 100) + ' грн');
+            if LShiftReport.Taxes[J].ReturnsTurnover > 0 then
+              LText.Add('  Повернення: ' + FormatFloat('0.00', LShiftReport.Taxes[J].ReturnsTurnover / 100) + ' грн');
+            LText.Add('');
+          end;
+        end;
+      end;
+
+      LText.Add('═══════════════════════════════════════════════════');
+      LText.Add('             ЗВІТ СФОРМОВАНО УСПІШНО');
+      LText.Add('═══════════════════════════════════════════════════');
+
+      Result := LText.Text;
+    finally
+      LText.Free;
+    end;
+  end;
+
 begin
   // ВИПРАВЛЕННЯ: Для X-звіту не потрібен ShiftId - він створюється для поточної відкритої зміни
   // Отримуємо Х-звіт через API
@@ -2714,18 +2902,10 @@ begin
           Log('  Символ: ' + LShiftReport.Taxes[I].Symbol);
           Log('  Ставка: ' + FloatToStr(LShiftReport.Taxes[I].Rate) + '%');
 
-          // ВИПРАВЛЕННЯ: Деякі поля можуть бути відсутні в X-звіті
-          // Log('  Додаткова ставка: ' + FloatToStr(LShiftReport.Taxes[I].ExtraRate) + '%'); // Може бути 0
-
           Log('  Сума продажів: ' + FloatToStr(LShiftReport.Taxes[I].SellSum / 100) + ' грн');
           Log('  Сума повернень: ' + FloatToStr(LShiftReport.Taxes[I].ReturnSum / 100) + ' грн');
           Log('  Оборот продажів: ' + FloatToStr(LShiftReport.Taxes[I].SalesTurnover / 100) + ' грн');
           Log('  Оборот повернень: ' + FloatToStr(LShiftReport.Taxes[I].ReturnsTurnover / 100) + ' грн');
-
-          // ВИПРАВЛЕННЯ: Ці поля можуть бути відсутні в X-звіті
-          // Log('  Сума податку: ' + FloatToStr(LShiftReport.Taxes[I].TaxSum / 100) + ' грн');
-          // Log('  Додаткова сума податку: ' + FloatToStr(LShiftReport.Taxes[I].ExtraTaxSum / 100) + ' грн');
-          // Log('  Включено: ' + BoolToStr(LShiftReport.Taxes[I].Included, True));
 
           Log('  Без ПДВ: ' + BoolToStr(LShiftReport.Taxes[I].NoVat, True));
           Log('  Розширений код: ' + LShiftReport.Taxes[I].AdvancedCode);
@@ -2739,26 +2919,71 @@ begin
 
       Log('=== КІНЕЦЬ Х-ЗВІТУ ===');
 
-      // ВИПРАВЛЕННЯ: Додатково можна отримати текстову версію звіту
-      if FReceiptAPI.GetReportText(LShiftReport.Id, LResponse) then
-      begin
-        Log('--- ТЕКСТОВА ВЕРСІЯ ЗВІТУ ---');
-        Log(LResponse);
-        Log('--- КІНЕЦЬ ТЕКСТОВОЇ ВЕРСІЇ ---');
+      // Створюємо текстову версію звіту
+      LTextReport := GenerateXReportText(LShiftReport);
+
+      // Виводимо в лог
+      (*Log('--- ТЕКСТОВА ВЕРСІЯ Х-ЗВІТУ ---');
+      Log(LTextReport);
+      Log('--- КІНЕЦЬ ТЕКСТОВОЇ ВЕРСІЇ ---'); *)
+
+      // Зберігаємо у файл
+      LReportFile := IncludeTrailingPathDelimiter(receiptspath) +
+                    'xreport_' + LShiftReport.Id + '_' +
+                    FormatDateTime('yyyy-mm-dd_hh-nn-ss', Now) + '.txt';
+
+      with TStringList.Create do
+      try
+        Text := LTextReport;
+        SaveToFile(LReportFile);
+        Log('✅ Текстовий звіт збережено: ' + ExtractFileName(LReportFile));
+      finally
+        Free;
       end;
+
+
+      // === ВАРІАНТ 2: Офіційна текстова версія з API ===
+      FReceiptAPI.ReceiptsDirectory := receiptspath;
+      FReceiptAPI.TempDirectory := temppath;
+
+      if FReceiptAPI.GetReportText(LShiftReport.Id, LResponse, 42) then // width=42
+      begin
+        Log('--- ОФІЦІЙНА ТЕКСТОВА ВЕРСІЯ Х-ЗВІТУ ---');
+        Log(LResponse);
+        Log('--- КІНЕЦЬ ОФІЦІЙНОЇ ВЕРСІЇ ---');
+      end
+      else
+      begin
+        Log('⚠️ Офіційна текстова версія недоступна: ' + FReceiptAPI.LastError);
+        Log('ℹ️ Використовується власна текстова версія');
+      end;
+
+      // === ВАРІАНТ 3: PNG версія звіту ===
+      LPngFileName := IncludeTrailingPathDelimiter(receiptspath) +
+                    'xreport_' + LShiftReport.Id + '_' +
+                    FormatDateTime('yyyy-mm-dd_hh-nn-ss', Now) + '.png';
+      if FReceiptAPI.GetReportPNG(LShiftReport.Id, LPngFileName, 30, 58) then // width=30, paper_width=58
+      begin
+        Log('✅ PNG звіт отримано: ' + ExtractFileName(LPngFileName));
+        // Тут можна додати відображення зображення в інтерфейсі
+        // Image1.Picture.LoadFromFile(LPngFileName);
+      end
+      else
+      begin
+        Log('⚠️ PNG версія звіту недоступна: ' + FReceiptAPI.LastError);
+      end;
+
+
+
 
     finally
       if Assigned(LShiftReport) then
-        LShiftReport.Free; // Не забуваємо звільнити пам'ять
+        LShiftReport.Free;
     end;
   end
   else
   begin
     Log('Помилка отримання Х-звіту: ' + LResponse);
-
-    // ВИПРАВЛЕННЯ: Додаткова інформація для налагодження
-    if Pos('зміна не відкрита', LResponse) > 0 then
-      Log('Перевірте, чи відкрита зміна для отримання X-звіту');
   end;
 end;
 
@@ -3200,6 +3425,8 @@ begin
   IniPropStorage1.IniSection:='PATH';
   reppath:=IniPropStorage1.ReadString('ReportPath','');
   logpath:=IniPropStorage1.ReadString('LogPath','');
+  temppath:=IniPropStorage1.ReadString('TempPath','');
+  receiptspath:=IniPropStorage1.ReadString('ReceiptsPath','');
   IniPropStorage1.IniSection:='SECURE';
   level:=IniPropStorage1.ReadInteger('Level',0)=1;
   IniPropStorage1.IniSection:='OPTIONS';
@@ -3222,7 +3449,6 @@ begin
 
   // Зберігаємо попереднє значення
   PreviousUseCheckboxAPI := UseCheckboxAPI;
-
   UseCheckboxAPI:=IniPropStorage1.ReadInteger('UseCheckboxAPI',0)=1;
   edtUsername.Text:=IniPropStorage1.ReadString('Username','test_cwmtmpukq');
   edtPassword.Text:=IniPropStorage1.ReadString('Password','test_cwmtmpukq');
@@ -6101,6 +6327,22 @@ begin
   if DMMag.QChek.Active and (DMMag.QChek.RecordCount > 0) then
     Result := DMMag.QChek.FieldByName('KOD').AsInteger;
 end;
+
+// Допоміжні функції для роботи з файлами
+
+procedure TFmChek.SaveStringToFile(const AFileName, AContent: string);
+var
+  LFile: TStringList;
+begin
+  LFile := TStringList.Create;
+  try
+    LFile.Text := AContent;
+    LFile.SaveToFile(AFileName);
+  finally
+    LFile.Free;
+  end;
+end;
+
 
 initialization
   {$I chek.lrs}
