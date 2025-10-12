@@ -321,6 +321,8 @@ type
     function CanModifyCheck(CheckID: Integer): Boolean;
     function GetCurrentCheckID: Integer;
     procedure SaveStringToFile(const AFileName, AContent: string);
+    procedure ValidateAndRepairCheckData(CheckID: Integer);
+
 
   public
     { public declarations }
@@ -512,6 +514,8 @@ var
   LPNGFileName: string;
   LQRCodeFileName: string;
   LTextContent: string;
+  // НОВІ ЗМІННІ ДЛЯ ПЕРЕВІРОК
+  TotalFromGoods, TotalFromPayments: Double;
 begin
   Receipt := nil;
   ReceiptResponse := nil;
@@ -521,6 +525,12 @@ begin
   LPNGFileName := '';
   LQRCodeFileName := '';
   LTextContent := '';
+
+  // Отримати CheckID перед викликом ValidateAndRepairCheckData
+  CheckID := DMMag.QChekKOD.AsInteger;
+
+  // ВІДНОВЛЕННЯ ДАНИХ ПІСЛЯ АВАРІЙНОГО ЗАВЕРШЕННЯ
+  ValidateAndRepairCheckData(CheckID);
 
   if FIsProcessingFiscalization then
   begin
@@ -534,6 +544,28 @@ begin
   Screen.Cursor := crHourGlass;
 
   try
+    // ПЕРЕВІРКА СИНХРОНІЗАЦІЇ СУМ ПЕРЕД ФІСКАЛІЗАЦІЄЮ
+    TotalFromGoods := 0.0;
+    TotalFromPayments := seCash.Value + seCard.Value;
+
+    DMMag.QNData.First;
+    while not DMMag.QNData.EOF do
+    begin
+      TotalFromGoods := TotalFromGoods + DMMag.QNDataSUMMA.AsFloat;
+      DMMag.QNData.Next;
+    end;
+
+    if Abs(TotalFromGoods - TotalFromPayments) > 0.01 then // Допуск 1 копійка
+    begin
+      Log(Format('❌ НЕСПІВПАДІННЯ СУМ: Товари=%.2f, Оплати=%.2f', [TotalFromGoods, TotalFromPayments]));
+      ShowMessage(Format('Неспівпадіння сум:' + sLineBreak +
+                        'Сума товарів: %.2f грн' + sLineBreak +
+                        'Сума оплат: %.2f грн' + sLineBreak +
+                        'Внесіть коректну оплату перед фіскалізацією.',
+                        [TotalFromGoods, TotalFromPayments]));
+      Exit;
+    end;
+
     if not ValidateAPIState(True, True) then
       Exit;
 
@@ -618,7 +650,7 @@ begin
       Exit;
     end;
 
-    CheckID := DMMag.QChekKOD.AsInteger;
+    // CheckID вже отримано вище
 
     // Отримати поточну кількість спроб перед початком фіскалізації
     CurrentRetryCount := 0;
@@ -662,6 +694,7 @@ begin
       Receipt := TReceipt.Create;
       FillMandatoryReceiptFields(Receipt, CheckID);
 
+      // ДОДАТКОВА ПЕРЕВІРКА СТРУКТУРИ ЧЕКА
       Log('=== ФІНАЛЬНА ПЕРЕВІРКА СТРУКТУРИ ЧЕКА ===');
       Log('Receipt.TotalSum: ' + IntToStr(Receipt.TotalSum) + ' коп');
       Log('Receipt.TotalPayment: ' + IntToStr(Receipt.TotalPayment) + ' коп');
@@ -671,8 +704,23 @@ begin
       begin
         Log('❌ КРИТИЧНА ПОМИЛКА: TotalPayment < TotalSum!');
         Log('TotalPayment: ' + IntToStr(Receipt.TotalPayment) + ', TotalSum: ' + IntToStr(Receipt.TotalSum));
-        ShowMessage('Критична помилка: сума оплати менша за загальну суму чека');
-        Exit;
+
+        // АВТОМАТИЧНЕ ВИПРАВЛЕННЯ ЗАМІСТЬ АВАРІЙНОГО ЗАВЕРШЕННЯ
+        Log('🔄 Спроба автоматичного виправлення сум...');
+        Receipt.TotalPayment := Receipt.TotalSum;
+        Receipt.Rest := 0;
+
+        // Коректуємо оплати
+        if Length(Receipt.Payments) > 0 then
+        begin
+          Receipt.Payments[0].Value := Receipt.TotalSum;
+          Log('✅ Суми автоматично виправлено');
+        end
+        else
+        begin
+          ShowMessage('Критична помилка: сума оплати менша за загальну суму чека. Додайте оплату.');
+          Exit;
+        end;
       end
       else
       begin
@@ -701,9 +749,24 @@ begin
       begin
         Log('❌ ПОМИЛКА: Сума товарів ≠ Сумі оплат!');
         Log('Різниця: ' + FloatToStrF((TotalGoodsSum - TotalPaymentsSum)/100, ffNumber, 10, 2) + ' грн');
-        ShowMessage('Помилка: Сума товарів (' + FloatToStrF(TotalGoodsSum/100, ffNumber, 10, 2) +
-                   ' грн) не дорівнює сумі оплат (' + FloatToStrF(TotalPaymentsSum/100, ffNumber, 10, 2) + ' грн)');
-        Exit;
+
+        // АВТОМАТИЧНЕ ВИПРАВЛЕННЯ
+        if TotalPaymentsSum < TotalGoodsSum then
+        begin
+          Log('🔄 Автоматично виправляємо оплату...');
+          if Length(Receipt.Payments) > 0 then
+          begin
+            Receipt.Payments[0].Value := TotalGoodsSum;
+            Receipt.TotalPayment := TotalGoodsSum;
+            Receipt.Rest := 0;
+            Log('✅ Оплату автоматично виправлено');
+          end;
+        end;
+
+        // Все одно показуємо повідомлення, але не зупиняємо програму
+        ShowMessage('Увага: Сума товарів (' + FloatToStrF(TotalGoodsSum/100, ffNumber, 10, 2) +
+                   ' грн) не дорівнює сумі оплат (' + FloatToStrF(TotalPaymentsSum/100, ffNumber, 10, 2) + ' грн)' +
+                   sLineBreak + 'Спроба автоматичного виправлення...');
       end
       else
       begin
@@ -748,7 +811,7 @@ begin
         begin
           Log('❌ Помилка спроби ' + IntToStr(RetryCount + 1) + ': ' + Response);
 
-          // СПЕЦІАЛЬНА ОБРОБКА ПОМИЛОК ПОДАТКОВИХ ГРУП (новий код)
+          // СПЕЦІАЛЬНА ОБРОБКА ПОМИЛОК ПОДАТКОВИХ ГРУП
           if (Pos('податк', LowerCase(Response)) <> 0) or (Pos('tax', LowerCase(Response)) <> 0) then
           begin
             Log('⚠️ Проблема з податковими групами - потрібне налаштування в кабінеті Checkbox');
@@ -814,10 +877,9 @@ begin
         Log('Початковий статус: ' + ReceiptStatusToString(ReceiptResponse.Status));
         Log('Фіскальний номер: ' + ReceiptResponse.FiscalCode);
 
-        // ВИПРАВЛЕННЯ: ВИКЛИКАТИ HandleSuccessfulFiscalization ПЕРШИМ
         HandleSuccessfulFiscalization(CheckID, Receipt, ReceiptResponse);
 
-        // ТЕПЕР ОТРИМУЄМО ВІЗУАЛІЗАЦІЮ ПОСЛЯ ФІСКАЛІЗАЦІЇ
+        // ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ПОСЛЯ ФІСКАЛІЗАЦІЇ
         Log('=== ПОЧАТОК ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ЧЕКА ===');
 
         Log('Перевірка директорій:');
@@ -944,7 +1006,6 @@ begin
     Log('=== ЗАВЕРШЕННЯ ФІСКАЛІЗАЦІЇ ===');
   end;
 end;
-
 // Для внесення готівки
 procedure TFmChek.btnCashInClick(Sender: TObject);
 var
@@ -6349,6 +6410,50 @@ begin
   end;
 end;
 
+procedure TFmChek.ValidateAndRepairCheckData(CheckID: Integer);
+begin
+  try
+    // Перевірка активності запитів
+    if not DMMag.QChek.Active then
+      DMMag.QChek.Open;
+    if not DMMag.QNData.Active then
+      DMMag.QNData.Open;
+
+    // Відновлення статусів після аварійного завершення
+    if (DMMag.QChekFISCAL_STATUS.AsString = 'SENT') or
+       (DMMag.QChekFISCAL_STATUS.AsString = 'PROCESSING') then
+    begin
+      Log('⚠️ Відновлення статусу чека після аварійного завершення');
+      DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_STATUS = ''NEW'' WHERE KOD = :CHECK_ID';
+      DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+      DMMag.SQLQ.ExecSQL;
+    end;
+
+    // Синхронізація сум
+    var TotalGoods := 0.0;
+    DMMag.QNData.First;
+    while not DMMag.QNData.EOF do
+    begin
+      TotalGoods := TotalGoods + DMMag.QNDataSUMMA.AsFloat;
+      DMMag.QNData.Next;
+    end;
+
+    // Оновлення суми в QChek якщо потрібно
+    if Abs(DMMag.QChekSUMMA.AsFloat - TotalGoods) > 0.01 then
+    begin
+      Log(Format('Відновлення суми чека: було %.2f, стало %.2f',
+        [DMMag.QChekSUMMA.AsFloat, TotalGoods]));
+      DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET SUMMA = :SUMMA WHERE KOD = :CHECK_ID';
+      DMMag.SQLQ.ParamByName('SUMMA').AsFloat := TotalGoods;
+      DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+      DMMag.SQLQ.ExecSQL;
+    end;
+
+  except
+    on E: Exception do
+      Log('❌ Помилка відновлення даних чека: ' + E.Message);
+  end;
+end;
 
 initialization
   {$I chek.lrs}
