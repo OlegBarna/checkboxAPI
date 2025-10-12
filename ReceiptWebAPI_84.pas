@@ -668,6 +668,7 @@ type
     FCurrentBalance: Integer;
     FLastBalanceUpdate: TDateTime;
     FBalanceUpdateInterval: Integer;
+    FDefaultTaxGroup:Integer;
 
     //FAccessToken: string; // Токен авторизації
     //FTokenExpiration: TDateTime; // Час закінчення дії токена
@@ -716,8 +717,10 @@ type
     procedure SetAuthToken(const Value: string);
     function BuildJsonDataCorrected(AReceipt: TReceipt): TJSONObject;
     function IsNetworkError(const AResponse: string): Boolean;
-
-
+    procedure ProcessReceiptResponse(const ResponseContent: string; out ShouldRetry: Boolean; out ErrorMessage: string);
+    procedure ExtractTaxGroupsFromError(const ErrorMsg: string; TaxGroups: TStringList);
+    procedure HandleTaxGroupError(const FieldPath: string;  AvailableTaxGroups: TStringList; out ShouldRetry: Boolean);
+    procedure SetDefaultTaxGroup(ATaxGroup: Integer);
     //function GetTempDirectory: string;
 
   public
@@ -739,6 +742,8 @@ type
     property LastError: string read FLastError;
     property ReceiptsDirectory: string read FReceiptsDirectory write FReceiptsDirectory;
     property TempDirectory: string read FTempDirectory write FTempDirectory;
+    property DefaultTaxGroup: integer read FDefaultTaxGroup write FDefaultTaxGroup;
+
 
     //function GetReceiptsDirectory: string;
 
@@ -6551,6 +6556,8 @@ var
   Command, JsonString, TempFile, ValidationError, Endpoint: string;
   StringList: TStringList;
   i: integer;
+  ShouldRetry: Boolean;
+  ErrorMsg: string;
 begin
   // ДЕТАЛЬНЕ ЛОГУВАННЯ СТВОРЕНОГО З БАЗИ ЧЕКА
   Log('=== ДЕТАЛЬНА ІНФОРМАЦІЯ ПРО ЧЕК ПЕРЕД ВІДПРАВКОЮ ===');
@@ -6710,24 +6717,47 @@ begin
         begin
           Log('✅ Отримано відповідь від сервера');
 
-          // Перевірка на помилки API
+          // Спочатку перевіряємо на помилки валідації
           if CheckResponseForErrors(AResponse) then
           begin
-            ParseAPIError(AResponse, AResponse);
-            Log('❌ Помилка API: ' + AResponse);
-            Result := False;
+            // Аналізуємо відповідь на предмет специфічних помилок
+            ProcessReceiptResponse(AResponse, ShouldRetry, ErrorMsg);
 
-            // Детальний аналіз типових помилок
-            if Pos('order_id', AResponse) > 0 then
-              Log('💡 Рекомендація: Не передавайте order_id або використовуйте UUID');
-            if Pos('context', AResponse) > 0 then
-              Log('💡 Рекомендація: Не передавайте context');
-            if Pos('uuid', AResponse) > 0 then
-              Log('💡 Рекомендація: Перевірте формат UUID полів');
+            if ErrorMsg <> '' then
+            begin
+              // Використовуємо деталізоване повідомлення про помилку
+              AResponse := ErrorMsg;
+
+              if ShouldRetry then
+              begin
+                Log('🔄 Помилка виправлена - дозволено повторну спробу');
+                // Result залишаємо False, щоб викликаючий код міг повторити спробу
+              end
+              else
+              begin
+                Log('❌ Помилка API (без повторної спроби): ' + AResponse);
+                Result := False;
+              end;
+            end
+            else
+            begin
+              // Стандартна обробка помилок
+              ParseAPIError(AResponse, AResponse);
+              Log('❌ Помилка API: ' + AResponse);
+              Result := False;
+
+              // Детальний аналіз типових помилок
+              if Pos('order_id', AResponse) > 0 then
+                Log('💡 Рекомендація: Не передавайте order_id або використовуйте UUID');
+              if Pos('context', AResponse) > 0 then
+                Log('💡 Рекомендація: Не передавайте context');
+              if Pos('uuid', AResponse) > 0 then
+                Log('💡 Рекомендація: Перевірте формат UUID полів');
+            end;
           end
           else
           begin
-            // Спроба парсингу успішної відповіді
+            // УСПІШНА ВІДПОВІДЬ - парсимо результат
             try
               AReceiptResponse := TReceiptResponse.Create;
               Result := AReceiptResponse.ParseFromJSON(AResponse, Self);
@@ -8764,7 +8794,191 @@ begin
   end;
 end;
 
+// Додайте в імплементацію TReceiptWebAPI
+procedure TReceiptWebAPI.ProcessReceiptResponse(const ResponseContent: string;
+  out ShouldRetry: Boolean; out ErrorMessage: string);
+var
+  JSONData: TJSONData;
+  JSONObject: TJSONObject;
+  Details: TJSONArray;
+  Detail: TJSONObject;
+  i,j: Integer;
+  ErrorMsg, FieldPath: string;
+  TaxGroups: TStringList;
+  LocArray: TJSONArray;
+begin
+  ShouldRetry := False;
+  ErrorMessage := '';
 
+  try
+    // Парсимо JSON відповідь в Lazarus
+    JSONData := GetJSON(ResponseContent);
+
+    if not Assigned(JSONData) then
+      Exit;
+
+    try
+      if JSONData.JSONType = jtObject then
+      begin
+        JSONObject := TJSONObject(JSONData);
+
+        // Перевіряємо наявність деталей помилки валідації
+        if JSONObject.Find('detail') <> nil then
+        begin
+          Details := JSONObject.Arrays['detail'];
+
+          for i := 0 to Details.Count - 1 do
+          begin
+            if Details.Items[i].JSONType = jtObject then
+            begin
+              Detail := TJSONObject(Details.Items[i]);
+
+              // Отримуємо шлях до поля з помилкою
+              if Detail.Find('loc') <> nil then
+              begin
+                LocArray := Detail.Arrays['loc'];
+                FieldPath := '';
+                // Об'єднуємо всі елементи масиву loc в один шлях
+                for j := 0 to LocArray.Count - 1 do
+                begin
+                  if j > 0 then
+                    FieldPath := FieldPath + '.';
+                  FieldPath := FieldPath + LocArray.Items[j].AsString;
+                end;
+              end;
+
+              // Отримуємо повідомлення про помилку
+              if Detail.Find('msg') <> nil then
+                ErrorMsg := Detail.Strings['msg']
+              else
+                ErrorMsg := 'Невідома помилка валідації';
+
+              // Спеціальна обробка помилок податкових груп
+              if (Pos('tax', LowerCase(FieldPath)) > 0) or (Pos('податк', LowerCase(ErrorMsg)) > 0) then
+              begin
+                Log('⚠️ ПОМИЛКА ПОДАТКОВОЇ ГРУПИ: ' + ErrorMsg);
+                Log('📍 Поле: ' + FieldPath);
+
+                // Виділяємо доступні податкові групи з повідомлення про помилку
+                TaxGroups := TStringList.Create;
+                try
+                  ExtractTaxGroupsFromError(ErrorMsg, TaxGroups);
+
+                  if TaxGroups.Count > 0 then
+                  begin
+                    Log('💡 Доступні податкові групи: ' + TaxGroups.CommaText);
+                    // Можна автоматично виправити або запропонувати користувачу
+                    HandleTaxGroupError(FieldPath, TaxGroups, ShouldRetry);
+                  end;
+                finally
+                  TaxGroups.Free;
+                end;
+
+                ErrorMessage := 'Помилка податкової групи: ' + ErrorMsg;
+                Exit;
+              end;
+
+              // Обробка інших типів помилок валідації
+              Log('⚠️ ПОМИЛКА ВАЛІДАЦІЇ: ' + ErrorMsg);
+              Log('📍 Поле: ' + FieldPath);
+
+              // Для інших помилок валідації не робимо повторних спроб
+              ShouldRetry := False;
+              ErrorMessage := ErrorMsg;
+              Exit;
+            end;
+          end;
+        end
+        else if JSONObject.Find('message') <> nil then
+        begin
+          // Загальне повідомлення про помилку
+          ErrorMsg := JSONObject.Strings['message'];
+          Log('⚠️ ПОМИЛКА API: ' + ErrorMsg);
+          ErrorMessage := ErrorMsg;
+
+          // Для деяких типів помилок можна спробувати ще раз
+          if Pos('timeout', LowerCase(ErrorMsg)) > 0 then
+            ShouldRetry := True
+          else if Pos('busy', LowerCase(ErrorMsg)) > 0 then
+            ShouldRetry := True;
+        end;
+      end;
+    finally
+      JSONData.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      Log('❌ Помилка парсингу відповіді: ' + E.Message);
+      ErrorMessage := 'Помилка обробки відповіді сервера: ' + E.Message;
+    end;
+  end;
+end;
+
+// Допоміжна функція для вилучення податкових груп з повідомлення про помилку
+procedure TReceiptWebAPI.ExtractTaxGroupsFromError(const ErrorMsg: string; TaxGroups: TStringList);
+var
+  StartPos, EndPos: Integer;
+  GroupsStr: string;
+begin
+  StartPos := Pos('Доступні податкові ставки:', ErrorMsg);
+  if StartPos > 0 then
+  begin
+    StartPos := StartPos + Length('Доступні податкові ставки:');
+    EndPos := Pos(']', Copy(ErrorMsg, StartPos, MaxInt));
+
+    if EndPos > 0 then
+    begin
+      GroupsStr := Copy(ErrorMsg, StartPos, EndPos - 1);
+      GroupsStr := StringReplace(GroupsStr, '[', '', []);
+      GroupsStr := StringReplace(GroupsStr, ']', '', []);
+      GroupsStr := StringReplace(GroupsStr, '''', '', [rfReplaceAll]);
+
+      TaxGroups.CommaText := GroupsStr;
+    end;
+  end
+  else
+  begin
+    // Резервні значення на основі типової помилки
+    TaxGroups.Add('8');
+    TaxGroups.Add('З');
+  end;
+end;
+
+// Обробка помилок податкових груп
+procedure TReceiptWebAPI.HandleTaxGroupError(const FieldPath: string;
+  AvailableTaxGroups: TStringList; out ShouldRetry: Boolean);
+var
+  ADefaultTaxGroup: string;
+begin
+  ShouldRetry := False;
+
+  // Якщо є доступні податкові групи, вибираємо першу за замовчуванням
+  if AvailableTaxGroups.Count > 0 then
+  begin
+    ADefaultTaxGroup := AvailableTaxGroups[0];
+    Log('💡 Автоматичне виправлення: використання податкової групи  8');// + ADefaultTaxGroup);
+
+    // Тут можна реалізувати логіку автоматичного виправлення
+    // Наприклад, змінити податкові групи в налаштуваннях API
+    //SetDefaultTaxGroup(StrToIntDef(ADefaultTaxGroup, 8));
+    SetDefaultTaxGroup(8);
+    // Дозволяємо повторну спробу з виправленими налаштуваннями
+    ShouldRetry := True;
+  end
+  else
+  begin
+    Log('❌ Не вдалося визначити доступні податкові групи');
+    Log('💡 Рекомендація: налаштуйте податкові групи в кабінеті Checkbox');
+  end;
+end;
+
+// Метод для встановлення податкової групи за замовчуванням
+procedure TReceiptWebAPI.SetDefaultTaxGroup(ATaxGroup: Integer);
+begin
+  FDefaultTaxGroup := ATaxGroup;
+  Log('✅ Встановлено податкову групу за замовчуванням: ' + IntToStr(ATaxGroup));
+end;
 
 
 end.
