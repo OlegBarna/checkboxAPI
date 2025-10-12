@@ -577,8 +577,8 @@ begin
       Log('Зʼєднання з інтернетом перевірено успішно');
     end;
 
-    FReceiptAPI.ReceiptsDirectory := receiptspath; // Встановлюємо директорію
-    FReceiptAPI.TempDirectory := temppath; // Встановлюємо директорію
+    FReceiptAPI.ReceiptsDirectory := receiptspath;
+    FReceiptAPI.TempDirectory := temppath;
 
     // Перевірити та створити директорії
     if not DirectoryExists(FReceiptAPI.ReceiptsDirectory) then
@@ -743,54 +743,67 @@ begin
             end;
           end;
           Break;
-        end;
-
-        Log('❌ Помилка спроби ' + IntToStr(RetryCount + 1) + ': ' + Response);
-
-        // Перевірити, чи варто робити наступну спробу
-        if not ShouldRetryFiscalization(CheckID, Response, RetryCount) then
+        end
+        else
         begin
-          Log('⏹️  Подальші спроби припинено за логікою ShouldRetryFiscalization');
-          Break;
-        end;
+          Log('❌ Помилка спроби ' + IntToStr(RetryCount + 1) + ': ' + Response);
 
-        if Pos('order_id', Response) > 0 then
-        begin
-          Log('⚠️ Проблема з order_id - сервер очікує UUID або порожнє значення');
-        end;
-
-        if Pos('offline', LowerCase(Response)) > 0 then
-        begin
-          Log('⚠️ Каса перейшла в офлайн-режим під час фіскалізації');
-          ShowMessage('Каса перейшла в офлайн-режим. Спробуйте пізніше.');
-          Break;
-        end;
-
-        if Pos('shift', LowerCase(Response)) > 0 then
-        begin
-          Log('⚠️ Проблема зі зміною - можливо, зміна закрита або неактивна');
-          ShowMessage('Проблема зі зміною. Перевірте, чи зміна відкрита.');
-          Break;
-        end;
-
-        Inc(RetryCount);
-
-        // Оновити лічильник спроб в БД після кожної невдалої спроби
-        if RetryCount < MaxRetries then
-        begin
-          try
-            DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_RETRY_COUNT = :RETRY_COUNT WHERE KOD = :CHECK_ID';
-            DMMag.SQLQ.ParamByName('RETRY_COUNT').AsInteger := RetryCount;
-            DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-            DMMag.SQLQ.ExecSQL;
-            Log('Оновлено лічильник спроб: ' + IntToStr(RetryCount));
-          except
-            on E: Exception do
-              Log('Помилка оновлення лічильника спроб: ' + E.Message);
+          // СПЕЦІАЛЬНА ОБРОБКА ПОМИЛОК ПОДАТКОВИХ ГРУП (новий код)
+          if (Pos('податк', LowerCase(Response)) <> 0) or (Pos('tax', LowerCase(Response)) <> 0) then
+          begin
+            Log('⚠️ Проблема з податковими групами - потрібне налаштування в кабінеті Checkbox');
+            ShowMessage('Помилка податкових груп:' + sLineBreak +
+                       'Необхідно налаштувати податкові ставки в кабінеті Checkbox.' + sLineBreak +
+                       'Деталі: ' + Copy(Response, 1, 150));
+            // Не робимо подальших спроб для цього типу помилок
+            Break;
           end;
 
-          Log('🕒 Повторна спроба через 2 секунди...');
-          Sleep(2000);
+          // Перевірити, чи варто робити наступну спробу
+          if not ShouldRetryFiscalization(CheckID, Response, RetryCount) then
+          begin
+            Log('⏹️  Подальші спроби припинено за логікою ShouldRetryFiscalization');
+            Break;
+          end;
+
+          if Pos('order_id', Response) > 0 then
+          begin
+            Log('⚠️ Проблема з order_id - сервер очікує UUID або порожнє значення');
+          end;
+
+          if Pos('offline', LowerCase(Response)) > 0 then
+          begin
+            Log('⚠️ Каса перейшла в офлайн-режим під час фіскалізації');
+            ShowMessage('Каса перейшла в офлайн-режим. Спробуйте пізніше.');
+            Break;
+          end;
+
+          if Pos('shift', LowerCase(Response)) > 0 then
+          begin
+            Log('⚠️ Проблема зі зміною - можливо, зміна закрита або неактивна');
+            ShowMessage('Проблема зі зміною. Перевірте, чи зміна відкрита.');
+            Break;
+          end;
+
+          Inc(RetryCount);
+
+          // Оновити лічильник спроб в БД після кожної невдалої спроби
+          if RetryCount < MaxRetries then
+          begin
+            try
+              DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_RETRY_COUNT = :RETRY_COUNT WHERE KOD = :CHECK_ID';
+              DMMag.SQLQ.ParamByName('RETRY_COUNT').AsInteger := RetryCount;
+              DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+              DMMag.SQLQ.ExecSQL;
+              Log('Оновлено лічильник спроб: ' + IntToStr(RetryCount));
+            except
+              on E: Exception do
+                Log('Помилка оновлення лічильника спроб: ' + E.Message);
+            end;
+
+            Log('🕒 Повторна спроба через 2 секунди...');
+            Sleep(2000);
+          end;
         end;
       end;
 
@@ -802,7 +815,6 @@ begin
         Log('Фіскальний номер: ' + ReceiptResponse.FiscalCode);
 
         // ВИПРАВЛЕННЯ: ВИКЛИКАТИ HandleSuccessfulFiscalization ПЕРШИМ
-        // Ця функція чекає поки чек отримає статус DONE
         HandleSuccessfulFiscalization(CheckID, Receipt, ReceiptResponse);
 
         // ТЕПЕР ОТРИМУЄМО ВІЗУАЛІЗАЦІЮ ПОСЛЯ ФІСКАЛІЗАЦІЇ
@@ -818,7 +830,6 @@ begin
         if FReceiptAPI.GetReceiptPNG(ReceiptResponse.Id, LPNGFileName, 30, 58, 75) then
         begin
           Log('✓ PNG зображення отримано: ' + ExtractFileName(LPNGFileName));
-          // Файл автоматично зберігається за шляхом LPNGFileName
         end
         else
         begin
@@ -830,7 +841,6 @@ begin
         if FReceiptAPI.GetReceiptQRCode(ReceiptResponse.Id, LQRCodeFileName) then
         begin
           Log('✓ QR-код отримано: ' + ExtractFileName(LQRCodeFileName));
-          // Файл автоматично зберігається за шляхом LQRCodeFileName
         end
         else
         begin
@@ -842,7 +852,6 @@ begin
         if FReceiptAPI.GetReceiptHTML(ReceiptResponse.Id, LHTMLContent) then
         begin
           Log('✓ HTML представлення отримано');
-          // Зберігаємо HTML у файл
           SaveStringToFile(FReceiptAPI.ReceiptsDirectory + 'receipt_' + ReceiptResponse.Id + '.html', LHTMLContent);
         end
         else
@@ -918,16 +927,10 @@ begin
     begin
       Log('Очищення ресурсів...');
       if Assigned(Receipt) then
-      begin
-        Log('Звільнення памʼяті Receipt');
         FreeAndNil(Receipt);
-      end;
 
       if Assigned(ReceiptResponse) then
-      begin
-        Log('Звільнення памʼяті ReceiptResponse');
         FreeAndNil(ReceiptResponse);
-      end;
     end
     else
     begin
