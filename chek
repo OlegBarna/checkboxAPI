@@ -227,6 +227,7 @@ type
     FIsProcessingFiscalization: Boolean; // Захист від рекурсії
     FCashierNameFromIni: string;
     FDepartamentFromIni: string;
+    GoodsTaxGroup: integer; // з конфіг файлу група податків для товарів
 
 
     procedure InitializeLogFile;     // Новий метод для ініціалізації логу
@@ -373,6 +374,7 @@ begin
   FCurrentBalance := -1;
   FLastBalanceUpdate := 0;
   FIsProcessingFiscalization := False;
+  GoodsTaxGroup:=3;
 end;
 
 procedure TFmChek.FormKeyDown(Sender: TObject;var Key: Word;Shift: TShiftState);
@@ -3450,6 +3452,7 @@ begin
   // Зберігаємо попереднє значення
   PreviousUseCheckboxAPI := UseCheckboxAPI;
   UseCheckboxAPI:=IniPropStorage1.ReadInteger('UseCheckboxAPI',0)=1;
+  GoodsTaxGroup:=IniPropStorage1.ReadInteger('GoodsTaxGroup',3);
   edtUsername.Text:=IniPropStorage1.ReadString('Username','test_cwmtmpukq');
   edtPassword.Text:=IniPropStorage1.ReadString('Password','test_cwmtmpukq');
   edtClientName.Text:=IniPropStorage1.ReadString('ClientName','Магазинчик');
@@ -5378,8 +5381,8 @@ begin
       Good.Barcode := DMMag.QNData.FieldByName('TOVAR').AsString;
 
       // Додаємо податки для товару
-      SetLength(Good.TaxCodes, 1);
-      Good.TaxCodes[0] := TaxGroup;
+      SetLength(Good.Tax, 1);
+      Good.Tax[0] := TaxGroup;
 
       // Створюємо позицію товару
       GoodItem := TGoodItem.Create;
@@ -5449,7 +5452,7 @@ begin
   // Наприклад, перевірка в базі даних або за правилами бізнесу
 
   // За замовчуванням повертаємо 3-ю групу (0% без ПДВ)
-  Result := 3;
+  Result := GoodsTaxGroup;   //Result := 3;
 
   // Приклад логіки:
   {
