@@ -376,7 +376,7 @@ begin
   FCurrentBalance := -1;
   FLastBalanceUpdate := 0;
   FIsProcessingFiscalization := False;
-  GoodsTaxGroup:=3;
+  GoodsTaxGroup:=8;
 end;
 
 procedure TFmChek.FormKeyDown(Sender: TObject;var Key: Word;Shift: TShiftState);
@@ -515,7 +515,7 @@ var
   LQRCodeFileName: string;
   LTextContent: string;
   // НОВІ ЗМІННІ ДЛЯ ПЕРЕВІРОК
-  TotalFromGoods, TotalFromPayments: Double;
+  TotalFromGoods: Double;
 begin
   Receipt := nil;
   ReceiptResponse := nil;
@@ -546,7 +546,6 @@ begin
   try
     // ПЕРЕВІРКА СИНХРОНІЗАЦІЇ СУМ ПЕРЕД ФІСКАЛІЗАЦІЄЮ
     TotalFromGoods := 0.0;
-    TotalFromPayments := seCash.Value + seCard.Value;
 
     DMMag.QNData.First;
     while not DMMag.QNData.EOF do
@@ -555,14 +554,15 @@ begin
       DMMag.QNData.Next;
     end;
 
-    if Abs(TotalFromGoods - TotalFromPayments) > 0.01 then // Допуск 1 копійка
+    // Перевірка, чи сума товарів відповідає сумі в чеку
+    if Abs(TotalFromGoods - DMMag.QChekSUMMA.AsFloat) > 0.01 then
     begin
-      Log(Format('❌ НЕСПІВПАДІННЯ СУМ: Товари=%.2f, Оплати=%.2f', [TotalFromGoods, TotalFromPayments]));
+      Log(Format('❌ НЕСПІВПАДІННЯ СУМ: Товари=%.2f, Чек=%.2f', [TotalFromGoods, DMMag.QChekSUMMA.AsFloat]));
       ShowMessage(Format('Неспівпадіння сум:' + sLineBreak +
                         'Сума товарів: %.2f грн' + sLineBreak +
-                        'Сума оплат: %.2f грн' + sLineBreak +
-                        'Внесіть коректну оплату перед фіскалізацією.',
-                        [TotalFromGoods, TotalFromPayments]));
+                        'Сума в чеку: %.2f грн' + sLineBreak +
+                        'Перевірте коректність даних.',
+                        [TotalFromGoods, DMMag.QChekSUMMA.AsFloat]));
       Exit;
     end;
 
@@ -1006,6 +1006,7 @@ begin
     Log('=== ЗАВЕРШЕННЯ ФІСКАЛІЗАЦІЇ ===');
   end;
 end;
+
 // Для внесення готівки
 procedure TFmChek.btnCashInClick(Sender: TObject);
 var
@@ -5212,13 +5213,11 @@ begin
   if FiscalCode <> '' then
   begin
    // У HandleSuccessfulFiscalization додайте:
-   Log('HandleSuccessfulFiscalization ReceiptResponse.Id: ' + AReceiptResponse.Id);
-   Log('HandleSuccessfulFiscalization ReceiptResponse.FiscalCode: ' + AReceiptResponse.FiscalCode);
-   Log('HandleSuccessfulFiscalization CurrentShiftId: ' + FReceiptAPI.CurrentShiftId);
-   Log('HandleSuccessfulFiscalization CurrentCashRegisterId: ' + FReceiptAPI.CurrentCashRegisterId);
-
-
-
+   Log('HandleSuccessfulFiscalization: ');
+   Log('-ReceiptResponse.Id: ' + AReceiptResponse.Id);
+   Log('-ReceiptResponse.FiscalCode: ' + AReceiptResponse.FiscalCode);
+   Log('-CurrentShiftId: ' + FReceiptAPI.CurrentShiftId);
+   Log('-CurrentCashRegisterId: ' + FReceiptAPI.CurrentCashRegisterId);
 
    UpdateFiscalStatusInDB(ACheckID, 'DONE',
      Format('{"id":"%s","fiscal_code":"%s","serial":%d,"status":"%s","created_at":"%s","total_sum":%d}', [
@@ -6411,6 +6410,7 @@ begin
 end;
 
 procedure TFmChek.ValidateAndRepairCheckData(CheckID: Integer);
+var TotalGoods: Double;
 begin
   try
     // Перевірка активності запитів
@@ -6430,7 +6430,7 @@ begin
     end;
 
     // Синхронізація сум
-    var TotalGoods := 0.0;
+    TotalGoods := 0.0;
     DMMag.QNData.First;
     while not DMMag.QNData.EOF do
     begin
