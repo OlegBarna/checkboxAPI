@@ -322,7 +322,11 @@ type
     function GetCurrentCheckID: Integer;
     procedure SaveStringToFile(const AFileName, AContent: string);
     procedure ValidateAndRepairCheckData(CheckID: Integer);
-
+    // Допоміжні функції для роботи з Z-звітом
+    function ExtractZReportIdFromResponse(Response: string): string;
+    //procedure ParseAndShowZReport(ZReportJSON: string);
+    procedure GetZReportTextAndSave(ReportId: string);
+    procedure GetZReportPNGAndSave(ReportId: string);
 
   public
     { public declarations }
@@ -3211,6 +3215,7 @@ begin
   end;
 end;
 
+
 procedure TFmChek.btnCloseShiftSimpleCurlClick(Sender: TObject);
 var
   Response: string;
@@ -3297,6 +3302,120 @@ begin
     FreeAndNil(ShiftStatus);
 end;
 
+
+
+ //-1st
+(*procedure TFmChek.btnCloseShiftWithReportCurlClick(Sender: TObject);
+var
+  Response, ZReportResponse: string;
+  ShiftStatus: TShiftStatus;
+  Success: Boolean;
+  ShiftId: string;
+  ZReportId: string;
+begin
+  // Використовуємо ту саму перевірку, що і в робочому методі
+  if not ValidateAPIState(True, False) then  // RequireShift = True
+    Exit;
+
+  // Отримуємо ID зміни аналогічно робочому методу
+  ShiftId := edtShiftId.Text;
+  if ShiftId = '' then
+  begin
+    ShiftId := FReceiptAPI.CurrentShiftId;
+    if ShiftId = '' then
+      ShiftId := FReceiptAPI.LoadShiftFromFile;
+    if ShiftId = '' then
+    begin
+      ShowMessage('Немає активної зміни для закриття');
+      Exit;
+    end;
+    SynchronizeShiftId(ShiftId);
+  end;
+
+  if not ValidateShiftId(ShiftId) then
+  begin
+    ShowMessage('Недійсний ID зміни');
+    Exit;
+  end;
+
+  Log('Закриття зміни з отриманням Z-звіту через CURL...');
+  Log('Shift ID: ' + ShiftId);
+
+  // ВИПРАВЛЕННЯ: Використовуємо простий метод закриття, який працює
+  Success := FReceiptAPI.CloseShiftSimpleCurl(ShiftId, Response, ShiftStatus);
+
+  if Success and Assigned(ShiftStatus) then
+  begin
+    UpdateCashRegisterStatus('Зміна закрита ✓', clPurple);
+
+    Log('Запит на закриття зміни успішний!');
+    Log('Початковий статус: ' + ShiftStatus.Status);
+    Log('ID транзакції закриття: ' + ShiftStatus.ClosingTransactionId);
+
+    // Очікуємо статус CLOSED
+    FreeAndNil(ShiftStatus);
+    if FReceiptAPI.WaitForShiftStatus(ShiftId, 'CLOSED', Response, ShiftStatus) then
+    begin
+      if Assigned(ShiftStatus) then
+      begin
+        Log('Зміну успішно закрито!');
+        Log('Статус: ' + ShiftStatus.Status);
+        Log('Z-звіт: ' + ShiftStatus.ZReport);
+        Log('Серійний номер: ' + IntToStr(ShiftStatus.Serial));
+        Log('Час закриття: ' + DateTimeToStr(ShiftStatus.ClosedAt));
+
+        // ОТРИМАННЯ Z-ЗВІТУ: Отримуємо ID Z-звіту з відповіді
+        ZReportId := ExtractZReportIdFromResponse(Response);
+
+        if ZReportId <> '' then
+        begin
+          Log('Отримуємо детальний Z-звіт... ID: ' + ZReportId);
+
+          // Отримуємо детальний Z-звіт у JSON форматі
+          if FReceiptAPI.GetZReportCurl(ZReportId, ZReportResponse) then
+          begin
+            Log('Детальний Z-звіт отримано успішно!');
+            ParseAndShowZReport(ZReportResponse);
+
+            // Отримуємо текстове представлення Z-звіту
+            GetZReportTextAndSave(ZReportId);
+
+            // Отримуємо PNG представлення Z-звіту
+            GetZReportPNGAndSave(ZReportId);
+          end
+          else
+          begin
+            Log('Не вдалося отримати детальний Z-звіт: ' + ZReportResponse);
+          end;
+        end
+        else
+        begin
+          Log('Z-звіт не знайдено у відповіді');
+        end;
+
+        // Деактивуємо кнопки
+        btnCloseShiftSimpleCurl.Enabled := False;
+        btnCloseShiftWithReportCurl.Enabled := False;
+        ClearShiftState;
+      end;
+    end
+    else
+    begin
+      Log('Не вдалося закрити зміну. Остання відповідь: ' + Response);
+      ShowMessage('Не вдалося закрити зміну. Перевірте логи для деталей.');
+    end;
+  end
+  else
+  begin
+    Log('Помилка закриття зміни: ' + Response);
+    ShowMessage('Помилка закриття зміни: ' + Response);
+  end;
+
+  if Assigned(ShiftStatus) then
+    FreeAndNil(ShiftStatus);
+end;
+*)
+//2nd
 procedure TFmChek.btnCloseShiftWithReportCurlClick(Sender: TObject);
 var
   Response, ZReportResponse: string;
@@ -3430,6 +3549,8 @@ begin
     ShiftReport.Free;
   end;
 end;
+
+
 
 // ДОДАЄМО НОВУ ПРОЦЕДУРУ ДЛЯ ПАРСИНГУ ТА ВІДОБРАЖЕННЯ Z-ЗВІТУ
 procedure TFmChek.ParseAndShowZReport(const AZReportJSON: string);
@@ -6454,6 +6575,122 @@ begin
       Log('❌ Помилка відновлення даних чека: ' + E.Message);
   end;
 end;
+
+
+// Допоміжні функції для роботи з Z-звітом
+function TFmChek.ExtractZReportIdFromResponse(Response: string): string;
+var
+  JsonParser: TJSONParser;
+  JsonData: TJSONObject;
+  ZReportObj: TJSONData;
+begin
+  Result := '';
+  JsonParser := nil;
+  JsonData := nil;
+
+  try
+    JsonParser := TJSONParser.Create(Response, [joUTF8]);
+    JsonData := JsonParser.Parse as TJSONObject;
+
+    if Assigned(JsonData) then
+    begin
+      // Z-звіт знаходиться в полі z_report
+      ZReportObj := JsonData.Find('z_report');
+      if Assigned(ZReportObj) and (ZReportObj.JSONType = jtObject) then
+      begin
+        Result := TJSONObject(ZReportObj).Get('id', '');
+      end
+      else
+      begin
+        // Спробуємо знайти ID безпосередньо в корені
+        Result := JsonData.Get('id', '');
+      end;
+    end;
+  except
+    on E: Exception do
+    begin
+      Log('Помилка парсингу Z-звіту з відповіді: ' + E.Message);
+    end;
+  end;
+
+  // Звільнення пам'яті
+  if Assigned(JsonData) then
+    JsonData.Free;
+  if Assigned(JsonParser) then
+    JsonParser.Free;
+end;
+
+(*procedure TFmChek.ParseAndShowZReport(ZReportJSON: string);
+var
+  jsonData: TJSONObject;
+  reportId, shiftId, fiscalCode: string;
+  serial: Integer;
+begin
+  try
+    jsonData := TJSONObject.ParseJSONValue(ZReportJSON) as TJSONObject;
+    if Assigned(jsonData) then
+    begin
+      reportId := jsonData.GetValue('id').Value;
+      shiftId := jsonData.GetValue('shift_id').Value;
+      serial := StrToIntDef(jsonData.GetValue('serial').Value, 0);
+      fiscalCode := jsonData.GetValue('fiscal_code').Value;
+
+      Log('=== Z-ЗВІТ ===');
+      Log('ID звіту: ' + reportId);
+      Log('ID зміни: ' + shiftId);
+      Log('Серійний номер: ' + IntToStr(serial));
+      Log('Фіскальний код: ' + fiscalCode);
+      Log('Тип звіту: Z-звіт');
+      Log('================');
+
+      jsonData.Free;
+    end;
+  except
+    on E: Exception do
+      Log('Помилка парсингу Z-звіту: ' + E.Message);
+  end;
+end;*)
+
+procedure TFmChek.GetZReportTextAndSave(ReportId: string);
+var
+  ReportText, FileName: string;
+begin
+  if FReceiptAPI.GetReportText(ReportId, ReportText) then  // Змінили на GetReportText (без Curl)
+  begin
+    FileName := 'zreport_' + ReportId + '_' + FormatDateTime('yyyy-mm-dd_hh-nn-ss', Now) + '.txt';
+    SaveStringToFile(FReceiptAPI.TempDirectory + FileName, ReportText);  // Змінили GetTempPath на FReceiptAPI.TempDirectory
+    Log('Текст Z-звіту збережено: ' + FileName);
+
+    // Показуємо фрагмент звіту
+    Log('Z-звіт (фрагмент): ' + Copy(ReportText, 1, 200));
+  end
+  else
+  begin
+    Log('Не вдалося отримати текст Z-звіту');
+  end;
+end;
+
+
+procedure TFmChek.GetZReportPNGAndSave(ReportId: string);
+var
+  FileName: string;
+  Success: Boolean;
+begin
+  FileName := FReceiptAPI.ReceiptsDirectory + 'zreport_' + ReportId + '_' +  // Змінили GetReceiptsPath на FReceiptAPI.ReceiptsDirectory
+              FormatDateTime('yyyy-mm-dd_hh-nn-ss', Now) + '.png';
+
+  Success := FReceiptAPI.GetReportPNG(ReportId, FileName);  // Змінили на GetReportPNG (без Curl)
+
+  if Success then
+  begin
+    Log('PNG Z-звіт збережено: ' + FileName);
+  end
+  else
+  begin
+    Log('Не вдалося отримати PNG Z-звіт');
+  end;
+end;
+
 
 initialization
   {$I chek.lrs}
