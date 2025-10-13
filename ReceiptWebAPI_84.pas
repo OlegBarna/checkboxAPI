@@ -668,7 +668,6 @@ type
     FCurrentBalance: Integer;
     FLastBalanceUpdate: TDateTime;
     FBalanceUpdateInterval: Integer;
-    FDefaultTaxGroup:Integer;
 
     //FAccessToken: string; // Токен авторизації
     //FTokenExpiration: TDateTime; // Час закінчення дії токена
@@ -718,10 +717,6 @@ type
     function BuildJsonDataCorrected(AReceipt: TReceipt): TJSONObject;
     function IsNetworkError(const AResponse: string): Boolean;
     procedure ProcessReceiptResponse(const ResponseContent: string; out ShouldRetry: Boolean; out ErrorMessage: string);
-    procedure ExtractTaxGroupsFromError(const ErrorMsg: string; TaxGroups: TStringList);
-    procedure HandleTaxGroupError(const FieldPath: string;  AvailableTaxGroups: TStringList; out ShouldRetry: Boolean);
-    procedure SetDefaultTaxGroup(ATaxGroup: Integer);
-    //function GetTempDirectory: string;
 
   public
     constructor Create(ABaseURL, AClientName, AClientVersion, ALicenseKey: string;
@@ -742,10 +737,6 @@ type
     property LastError: string read FLastError;
     property ReceiptsDirectory: string read FReceiptsDirectory write FReceiptsDirectory;
     property TempDirectory: string read FTempDirectory write FTempDirectory;
-    property DefaultTaxGroup: integer read FDefaultTaxGroup write FDefaultTaxGroup;
-
-
-    //function GetReceiptsDirectory: string;
 
     function GenerateUUID: string;
     function IsValidUUID(const UUID: string): Boolean;
@@ -6723,10 +6714,26 @@ begin
             // Аналізуємо відповідь на предмет специфічних помилок
             ProcessReceiptResponse(AResponse, ShouldRetry, ErrorMsg);
 
+            // ВИДАЛЕНО: автоматичне виправлення помилок податкових груп
+            // ЗАМІСТЬ ЦЬОГО: просто констатуємо факт помилки
             if ErrorMsg <> '' then
             begin
-              // Використовуємо деталізоване повідомлення про помилку
               AResponse := ErrorMsg;
+
+              // Для помилок податкових груп - зупиняємо процес без повторних спроб
+              if Pos('tax.group', AResponse) > 0 then
+              begin
+                Log('❌ КРИТИЧНА ПОМИЛКА ПОДАТКОВИХ ГРУП: Неправильні налаштування податкових груп');
+                Log('📋 Деталі помилки: ' + AResponse);
+                Log('💡 НЕОБХІДНІ ДІЇ КОРИСТУВАЧА:');
+                Log('   1. Увійти на веб-портал Checkbox');
+                Log('   2. Налаштувати податкові ставки відповідно до вимог API');
+                Log('   3. Оновити налаштування товарів у локальній базі даних');
+                Log('   4. Перезапустити програму після налаштувань');
+                Log('📍 Доступні податкові групи в API: [8, "З"]');
+                Result := False;
+                Exit; // Зупиняємо процес - це системна помилка
+              end;
 
               if ShouldRetry then
               begin
@@ -8804,7 +8811,6 @@ var
   Detail: TJSONObject;
   i,j: Integer;
   ErrorMsg, FieldPath: string;
-  TaxGroups: TStringList;
   LocArray: TJSONArray;
 begin
   ShouldRetry := False;
@@ -8853,36 +8859,12 @@ begin
               else
                 ErrorMsg := 'Невідома помилка валідації';
 
-              // Спеціальна обробка помилок податкових груп
-              if (Pos('tax', LowerCase(FieldPath)) > 0) or (Pos('податк', LowerCase(ErrorMsg)) > 0) then
-              begin
-                Log('⚠️ ПОМИЛКА ПОДАТКОВОЇ ГРУПИ: ' + ErrorMsg);
-                Log('📍 Поле: ' + FieldPath);
-
-                // Виділяємо доступні податкові групи з повідомлення про помилку
-                TaxGroups := TStringList.Create;
-                try
-                  ExtractTaxGroupsFromError(ErrorMsg, TaxGroups);
-
-                  if TaxGroups.Count > 0 then
-                  begin
-                    Log('💡 Доступні податкові групи: ' + TaxGroups.CommaText);
-                    // Можна автоматично виправити або запропонувати користувачу
-                    HandleTaxGroupError(FieldPath, TaxGroups, ShouldRetry);
-                  end;
-                finally
-                  TaxGroups.Free;
-                end;
-
-                ErrorMessage := 'Помилка податкової групи: ' + ErrorMsg;
-                Exit;
-              end;
-
-              // Обробка інших типів помилок валідації
+              // ВИДАЛЕНО: спеціальна обробка помилок податкових груп
+              // ЗАЛИШЕНО: логування інших помилок валідації
               Log('⚠️ ПОМИЛКА ВАЛІДАЦІЇ: ' + ErrorMsg);
               Log('📍 Поле: ' + FieldPath);
 
-              // Для інших помилок валідації не робимо повторних спроб
+              // Для всіх помилок валідації не робимо повторних спроб
               ShouldRetry := False;
               ErrorMessage := ErrorMsg;
               Exit;
@@ -8914,72 +8896,6 @@ begin
     end;
   end;
 end;
-
-// Допоміжна функція для вилучення податкових груп з повідомлення про помилку
-procedure TReceiptWebAPI.ExtractTaxGroupsFromError(const ErrorMsg: string; TaxGroups: TStringList);
-var
-  StartPos, EndPos: Integer;
-  GroupsStr: string;
-begin
-  StartPos := Pos('Доступні податкові ставки:', ErrorMsg);
-  if StartPos > 0 then
-  begin
-    StartPos := StartPos + Length('Доступні податкові ставки:');
-    EndPos := Pos(']', Copy(ErrorMsg, StartPos, MaxInt));
-
-    if EndPos > 0 then
-    begin
-      GroupsStr := Copy(ErrorMsg, StartPos, EndPos - 1);
-      GroupsStr := StringReplace(GroupsStr, '[', '', []);
-      GroupsStr := StringReplace(GroupsStr, ']', '', []);
-      GroupsStr := StringReplace(GroupsStr, '''', '', [rfReplaceAll]);
-
-      TaxGroups.CommaText := GroupsStr;
-    end;
-  end
-  else
-  begin
-    // Резервні значення на основі типової помилки
-    TaxGroups.Add('8');
-    TaxGroups.Add('З');
-  end;
-end;
-
-// Обробка помилок податкових груп
-procedure TReceiptWebAPI.HandleTaxGroupError(const FieldPath: string;
-  AvailableTaxGroups: TStringList; out ShouldRetry: Boolean);
-var
-  ADefaultTaxGroup: string;
-begin
-  ShouldRetry := False;
-
-  // Якщо є доступні податкові групи, вибираємо першу за замовчуванням
-  if AvailableTaxGroups.Count > 0 then
-  begin
-    ADefaultTaxGroup := AvailableTaxGroups[0];
-    Log('💡 Автоматичне виправлення: використання податкової групи  8');// + ADefaultTaxGroup);
-
-    // Тут можна реалізувати логіку автоматичного виправлення
-    // Наприклад, змінити податкові групи в налаштуваннях API
-    //SetDefaultTaxGroup(StrToIntDef(ADefaultTaxGroup, 8));
-    SetDefaultTaxGroup(8);
-    // Дозволяємо повторну спробу з виправленими налаштуваннями
-    ShouldRetry := True;
-  end
-  else
-  begin
-    Log('❌ Не вдалося визначити доступні податкові групи');
-    Log('💡 Рекомендація: налаштуйте податкові групи в кабінеті Checkbox');
-  end;
-end;
-
-// Метод для встановлення податкової групи за замовчуванням
-procedure TReceiptWebAPI.SetDefaultTaxGroup(ATaxGroup: Integer);
-begin
-  FDefaultTaxGroup := ATaxGroup;
-  Log('✅ Встановлено податкову групу за замовчуванням: ' + IntToStr(ATaxGroup));
-end;
-
 
 end.
 
