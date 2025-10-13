@@ -792,7 +792,7 @@ type
     function GetShiftBalanceDirect(out ABalance: Integer; out AResponse: string): Boolean;
     procedure SaveBalanceData(JsonData: TJSONObject);
     function GetBalanceData: TShiftBalanceData;
-    function GetShiftZReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
+    //function GetShiftZReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetShiftXReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetCurrentBalance(out AResponse: string): Integer;
     function ForceBalanceUpdate(out AResponse: string): boolean;
@@ -845,7 +845,12 @@ type
     function GetReceiptText(const AReceiptId: string; out ATextContent: string): Boolean;
     function GetReceiptQRCode(const AReceiptId: string; out AFileName: string): Boolean;
 
-
+    // Для роботи з Z-звітами
+    function GetShiftZReportCurl(const AReportId: string; out AResponse: string): Boolean;
+    function GetZReportText(const AReportId: string; out ATextContent: string): Boolean;
+    function GetZReportPNG(const AReportId: string; out AFileName: string;
+      const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
+    function ExtractZReportIdFromCloseResponse(const AResponse: string): string;
 
   end;
 
@@ -6281,13 +6286,13 @@ begin
   Result := FBalanceData;
 end;
 
-function TReceiptWebAPI.GetShiftZReportCurl(const AShiftId: string;
-  out AResponse: string; out AShiftReport: TShiftReport): Boolean;
+function TReceiptWebAPI.GetShiftZReportCurl(const AReportId: string; out AResponse: string): Boolean;
 var
-  Command: string;
+  LCommand: string;
+  LOutput: string;
+  LExitCode: Integer;
 begin
   Result := False;
-  AShiftReport := nil;
   AResponse := '';
 
   if not IsTokenValid then
@@ -6299,33 +6304,46 @@ begin
     end;
   end;
 
+  // ВИПРАВЛЕННЯ: Використовуємо правильний ендпоінт для отримання звіту за ID
+  LCommand := 'curl -a -X GET ' +
+              '-H "Accept: application/json" ' +
+              '-H "X-Client-Name: ' + FClientName + '" ' +
+              '-H "X-Client-Version: ' + FClientVersion + '" ' +
+              '-H "Authorization: Bearer ' + FAuthInfo.Token + '" ' +
+              '"https://api.checkbox.ua/api/v1/reports/' + AReportId + '"';
+
+  // Логуємо команду
+  Log('⚡ [GetShiftZReportCurl] GET /api/v1/reports/' + AReportId);
+  Log('Executing curl command: ' + LCommand);
+
   try
-    // ВИПРАВЛЕНО: Z-звіт теж через /api/v1/reports, але для закритої зміни
-    // У реальності Z-звіт створюється автоматично при закритті зміни
-    Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" ' +
-                     '-H "X-Client-Version: %s" -H "Authorization: Bearer %s" ' +
-                     '"%s/api/v1/shifts/%s/z-report"',
-      [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, AShiftId]);
+    // Виконуємо команду через bash
+    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
 
-    Log('GetShiftZReportCurl: Виконуємо команду: curl ' + Command);
-    Result := ExecuteCurlCommand(Command, 'GetShiftZReportCurl', 'GET /api/v1/shifts/ShiftID/z-report', AResponse);
+    // Логуємо результат
+    Log('Curl exit status: ' + IntToStr(LExitCode));
+    Log('Raw output: ' + LOutput);
 
-    if Result then
+    if LExitCode = 0 then
     begin
-      // Для Z-звіту використовуємо той же парсер, що і для X-звіту
-      Result := ParseShiftReport(AResponse, AShiftReport);
+      AResponse := LOutput;
+      Result := True;
+      Log('✅ Z-звіт успішно отримано');
+    end
+    else
+    begin
+      AResponse := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
+      Log('✗ Помилка отримання Z-звіту: ' + AResponse);
     end;
-
   except
     on E: Exception do
     begin
-      AResponse := 'CURL command error: ' + E.Message;
-      Log('GetShiftZReportCurl: Виняток: ' + E.Message);
+      AResponse := 'Помилка отримання Z-звіту: ' + E.Message;
+      Log('✗ ' + AResponse);
       Result := False;
     end;
   end;
 end;
-
 
 function TReceiptWebAPI.GetShiftXReportCurl(const AShiftId: string;
   out AResponse: string; out AShiftReport: TShiftReport): Boolean;
@@ -8896,6 +8914,206 @@ begin
     end;
   end;
 end;
+
+function TReceiptWebAPI.GetZReportText(const AReportId: string; out ATextContent: string): Boolean;
+var
+  LCommand: string;
+  LOutputFile: string;
+  LSaveFile: string;
+  LFile: TStringList;
+  LOutput: string;
+  LExitCode: Integer;
+begin
+  Result := False;
+  ATextContent := '';
+
+  LOutputFile := IncludeTrailingPathDelimiter(FTempDirectory) + 'zreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
+  LSaveFile := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'zreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
+
+  // Формуємо повну curl команду для bash
+  LCommand := 'curl -a -X ''GET'' ' +
+              '''https://api.checkbox.ua/api/v1/reports/' + AReportId + '/text'' ' +
+              '-H ''accept: text/plain'' ' +
+              '-H ''X-Client-Name: ' + FClientName + ''' ' +
+              '-H ''X-Client-Version: ' + FClientVersion + ''' ' +
+              '-o "' + LOutputFile + '"';
+
+  // Логуємо команду
+  Log('⚡ [GetZReportText] /reports/' + AReportId + '/text');
+  Log('Executing curl command: ' + LCommand);
+
+  try
+    // Виконуємо команду через bash
+    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
+
+    // Логуємо результат
+    Log('Curl exit status: ' + IntToStr(LExitCode));
+
+    if LExitCode = 0 then
+    begin
+      // Читаємо отриманий текстовий файл
+      if FileExists(LOutputFile) then
+      begin
+        LFile := TStringList.Create;
+        try
+          LFile.LoadFromFile(LOutputFile);
+          ATextContent := LFile.Text;
+          Result := True;
+
+          // Копіюємо файл до RECEIPTS для збереження
+          if CopyFile(LOutputFile, LSaveFile) then
+          begin
+            Log('✅ Текст Z-звіту збережено: ' + ExtractFileName(LSaveFile));
+          end;
+
+          Log('✅ Текст Z-звіту успішно отримано: ' + LOutputFile);
+        finally
+          LFile.Free;
+        end;
+        DeleteFile(LOutputFile); // Видаляємо тимчасовий файл
+      end
+      else
+      begin
+        FLastError := 'Текстовий файл Z-звіту не було створено';
+        Log('✗ ' + FLastError);
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
+      Log('✗ Помилка отримання тексту Z-звіту: ' + FLastError);
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання тексту Z-звіту: ' + E.Message;
+      Log('✗ ' + FLastError);
+    end;
+  end;
+end;
+
+function TReceiptWebAPI.GetZReportPNG(const AReportId: string; out AFileName: string;
+  const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
+var
+  LCommand: string;
+  LParams: string;
+  LOutput: string;
+  LExitCode: Integer;
+begin
+  Result := False;
+  AFileName := '';
+
+  if not IsTokenValid then
+  begin
+    if not LoginCurl(FUsername, FPassword, LOutput) then
+    begin
+      Log('Потрібен повторний вхід: ' + LOutput);
+      Exit;
+    end;
+  end;
+
+  // Формуємо параметри
+  LParams := '';
+  if AWidth > 0 then
+    LParams := LParams + 'width=' + IntToStr(AWidth);
+  if APaperWidth > 0 then
+  begin
+    if LParams <> '' then LParams := LParams + '&';
+    LParams := LParams + 'paper_width=' + IntToStr(APaperWidth);
+  end;
+
+  // Створюємо унікальне ім'я файлу
+  AFileName := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'zreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.png';
+
+  // Формуємо повну curl команду для bash
+  LCommand := 'curl -a -X GET ' +
+              '-H "accept: image/png" ' +
+              '-H "X-Client-Name: ' + FClientName + '" ' +
+              '-H "X-Client-Version: ' + FClientVersion + '" ' +
+              '-H "Authorization: Bearer ' + FAuthInfo.Token + '" ' +
+              '"https://api.checkbox.ua/api/v1/reports/' + AReportId + '/png';
+
+  if LParams <> '' then
+    LCommand := LCommand + '?' + LParams;
+
+  LCommand := LCommand + '" ' +
+              '-o "' + AFileName + '"';
+
+  // Логуємо команду
+  Log('⚡ [GetZReportPNG] GET /api/v1/reports/' + AReportId + '/png');
+  Log('Executing curl command: ' + LCommand);
+
+  try
+    // Виконуємо команду через bash
+    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
+
+    // Логуємо результат
+    Log('Curl exit status: ' + IntToStr(LExitCode));
+    Log('Raw output: ' + LOutput);
+
+    if LExitCode = 0 then
+    begin
+      Result := True;
+      Log('✅ PNG Z-звіт успішно отримано: ' + AFileName);
+
+      if not FileExists(AFileName) then
+      begin
+        Result := False;
+        FLastError := 'Файл PNG Z-звіту не було створено';
+        Log('✗ ' + FLastError);
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
+      Log('✗ Помилка отримання PNG Z-звіту: ' + FLastError);
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання PNG Z-звіту: ' + E.Message;
+      Log('✗ ' + FLastError);
+      Result := False;
+    end;
+  end;
+end;
+
+function TReceiptWebAPI.ExtractZReportIdFromCloseResponse(const AResponse: string): string;
+var
+  JsonParser: TJSONParser;
+  JsonData, ZReportObj: TJSONObject;
+begin
+  Result := '';
+  try
+    JsonParser := TJSONParser.Create(AResponse, [joUTF8]);
+    try
+      JsonData := JsonParser.Parse as TJSONObject;
+      if Assigned(JsonData) then
+      begin
+        // Z-звіт знаходиться в полі z_report
+        if JsonData.Find('z_report') <> nil then
+        begin
+          ZReportObj := JsonData.Objects['z_report'];
+          if Assigned(ZReportObj) then
+          begin
+            Result := ZReportObj.Get('id', '');
+          end;
+        end;
+      end;
+    finally
+      if Assigned(JsonData) then
+        JsonData.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      Log('Помилка парсингу Z-звіту з відповіді: ' + E.Message);
+    end;
+  end;
+end;
+
+
+
 
 end.
 
