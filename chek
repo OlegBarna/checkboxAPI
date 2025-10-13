@@ -3304,20 +3304,19 @@ end;
 
 
 
- //-1st
-(*procedure TFmChek.btnCloseShiftWithReportCurlClick(Sender: TObject);
+procedure TFmChek.btnCloseShiftWithReportCurlClick(Sender: TObject);
 var
   Response, ZReportResponse: string;
   ShiftStatus: TShiftStatus;
   Success: Boolean;
-  ShiftId: string;
-  ZReportId: string;
+  ShiftId, ZReportId: string;
+  StartTime: TDateTime;
 begin
-  // Використовуємо ту саму перевірку, що і в робочому методі
+  // Перевірка стану API та зміни
   if not ValidateAPIState(True, False) then  // RequireShift = True
     Exit;
 
-  // Отримуємо ID зміни аналогічно робочому методу
+  // Отримання ID зміни (аналогічно простому закриттю)
   ShiftId := edtShiftId.Text;
   if ShiftId = '' then
   begin
@@ -3338,218 +3337,147 @@ begin
     Exit;
   end;
 
-  Log('Закриття зміни з отриманням Z-звіту через CURL...');
-  Log('Shift ID: ' + ShiftId);
-
-  // ВИПРАВЛЕННЯ: Використовуємо простий метод закриття, який працює
-  Success := FReceiptAPI.CloseShiftSimpleCurl(ShiftId, Response, ShiftStatus);
-
-  if Success and Assigned(ShiftStatus) then
+  // Підтвердження користувача
+  if MessageDlg('Закриття зміни з Z-звітом',
+      'Ви впевнені, що хочете закрити зміну та отримати детальний Z-звіт?' + sLineBreak +
+      'Ця операція займе більше часу, але надасть повну фінансову звітність.',
+      mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
   begin
-    UpdateCashRegisterStatus('Зміна закрита ✓', clPurple);
-
-    Log('Запит на закриття зміни успішний!');
-    Log('Початковий статус: ' + ShiftStatus.Status);
-    Log('ID транзакції закриття: ' + ShiftStatus.ClosingTransactionId);
-
-    // Очікуємо статус CLOSED
-    FreeAndNil(ShiftStatus);
-    if FReceiptAPI.WaitForShiftStatus(ShiftId, 'CLOSED', Response, ShiftStatus) then
-    begin
-      if Assigned(ShiftStatus) then
-      begin
-        Log('Зміну успішно закрито!');
-        Log('Статус: ' + ShiftStatus.Status);
-        Log('Z-звіт: ' + ShiftStatus.ZReport);
-        Log('Серійний номер: ' + IntToStr(ShiftStatus.Serial));
-        Log('Час закриття: ' + DateTimeToStr(ShiftStatus.ClosedAt));
-
-        // ОТРИМАННЯ Z-ЗВІТУ: Отримуємо ID Z-звіту з відповіді
-        ZReportId := ExtractZReportIdFromResponse(Response);
-
-        if ZReportId <> '' then
-        begin
-          Log('Отримуємо детальний Z-звіт... ID: ' + ZReportId);
-
-          // Отримуємо детальний Z-звіт у JSON форматі
-          if FReceiptAPI.GetZReportCurl(ZReportId, ZReportResponse) then
-          begin
-            Log('Детальний Z-звіт отримано успішно!');
-            ParseAndShowZReport(ZReportResponse);
-
-            // Отримуємо текстове представлення Z-звіту
-            GetZReportTextAndSave(ZReportId);
-
-            // Отримуємо PNG представлення Z-звіту
-            GetZReportPNGAndSave(ZReportId);
-          end
-          else
-          begin
-            Log('Не вдалося отримати детальний Z-звіт: ' + ZReportResponse);
-          end;
-        end
-        else
-        begin
-          Log('Z-звіт не знайдено у відповіді');
-        end;
-
-        // Деактивуємо кнопки
-        btnCloseShiftSimpleCurl.Enabled := False;
-        btnCloseShiftWithReportCurl.Enabled := False;
-        ClearShiftState;
-      end;
-    end
-    else
-    begin
-      Log('Не вдалося закрити зміну. Остання відповідь: ' + Response);
-      ShowMessage('Не вдалося закрити зміну. Перевірте логи для деталей.');
-    end;
-  end
-  else
-  begin
-    Log('Помилка закриття зміни: ' + Response);
-    ShowMessage('Помилка закриття зміни: ' + Response);
+    Exit;
   end;
 
-  if Assigned(ShiftStatus) then
-    FreeAndNil(ShiftStatus);
-end;
-*)
-//2nd
-procedure TFmChek.btnCloseShiftWithReportCurlClick(Sender: TObject);
-var
-  Response, ZReportResponse: string;
-  ShiftStatus: TShiftStatus;
-  Success: Boolean;
-  ShiftId, FiscalCode, FiscalDate: string;
-  ShiftReport: TShiftReport;
-  SkipClientNameCheck: Boolean;
-begin
-  if not ValidateAPIState(True, False) then  // RequireShift = True
-    Exit;
+  Log('=== ПОЧАТОК ЗАКРИТТЯ ЗМІНИ З Z-ЗВІТОМ ===');
+  Log('Shift ID: ' + ShiftId);
+  StartTime := Now;
 
-  // Отримуємо дані з форми
-  ShiftId := edtShiftId.Text;
-  FiscalCode := edtFiscalCode.Text;
-  FiscalDate := edtFiscalDate.Text;
-  SkipClientNameCheck := chkSkipClientNameCheck.Checked;
+  btnCloseShiftWithReportCurl.Enabled := False;
+  Screen.Cursor := crHourGlass;
+  ShiftStatus := nil;
 
-  // Якщо поле вводу порожнє, намагаємось взяти збережений ID
-  if ShiftId = '' then
-  begin
-    ShiftId := FReceiptAPI.CurrentShiftId;
-    if ShiftId = '' then
-      ShiftId := FReceiptAPI.LoadShiftFromFile; // Додати читання з файлу
-    if ShiftId = '' then
+  try // ДОДАНО: try для блоку finally
+    // КРОК 1: Закриття зміни (аналогічно простому закриттю)
+    Log('Крок 1: Закриття зміни...');
+    Success := FReceiptAPI.CloseShiftSimpleCurl(ShiftId, Response, ShiftStatus);
+
+    if not Success then
     begin
-      ShowMessage('Немає активної зміни для закриття');
+      Log('❌ Помилка закриття зміни: ' + Response);
+      ShowMessage('Помилка закриття зміни: ' + Copy(Response, 1, 200));
       Exit;
     end;
-    SynchronizeShiftId(ShiftId); // Синхронізуємо всі джерела
-  end;
 
-  // Попередження про складність ручного формування звіту
-  if MessageDlg('Увага', 'Ручне формування Z-звіту є складною задачею, схильною до помилок. ' +
-                'Рекомендується використовувати автоматичне формування звіту на сервері (кнопка "Просте закриття"). ' +
-                'Продовжити?', mtWarning, [mbYes, mbNo], 0) <> mrYes then
-  begin
-    Exit;
-  end;
-
-  // Створюємо тестовий звіт (потрібно заповнити реальними даними)
-  ShiftReport := TShiftReport.Create;
-  try
-    // Заповнюємо основні поля звіту
-    ShiftReport.Id := ShiftId;
-    ShiftReport.Serial := 1;
-    ShiftReport.SellReceiptsCount := 10;
-    ShiftReport.ReturnReceiptsCount := 0;
-    ShiftReport.CashWithdrawalReceiptsCount := 0;
-    ShiftReport.LastReceiptId := '';
-    ShiftReport.Initial := 0;
-    ShiftReport.Balance := 100000; // 1000 грн у копійках
-    ShiftReport.SalesRoundUp := 0;
-    ShiftReport.SalesRoundDown := 0;
-    ShiftReport.ReturnsRoundUp := 0;
-    ShiftReport.ReturnsRoundDown := 0;
-    ShiftReport.CreatedAt := Now;
-
-    // ВИПРАВЛЕННЯ: Тут потрібно заповнити масиви Payments і Taxes реальними даними!
-    // SetLength(ShiftReport.Payments, ...);
-    // SetLength(ShiftReport.Taxes, ...);
-
-    Log('Закриття зміни зі звітом через CURL...');
-    Log('Shift ID: ' + ShiftId);
-    Log('Skip Client Name Check: ' + BoolToStr(SkipClientNameCheck, True));
-
-    // ВИПРАВЛЕННЯ: Видалено непотрібний параметр CashRegisterId
-    Success := FReceiptAPI.CloseShiftWithReportCurl(
-      SkipClientNameCheck,
-      ShiftReport,
-      FiscalCode,
-      FiscalDate,
-      Response,
-      ShiftStatus
-    );
-
-    if Success and Assigned(ShiftStatus) then
+    if not Assigned(ShiftStatus) then
     begin
-      Log('Запит на закриття зміни зі звітом успішний!');
-      Log('ID зміни: ' + ShiftStatus.Id);
-      Log('Статус: ' + ShiftStatus.Status);
-      Log('Серійний номер: ' + IntToStr(ShiftStatus.Serial));
-      Log('Z-звіт: ' + ShiftStatus.ZReport);
-      Log('ID транзакції закриття: ' + ShiftStatus.ClosingTransactionId);
+      Log('❌ Помилка: ShiftStatus = nil після успішного виклику');
+      ShowMessage('Помилка: не вдалося отримати дані зміни');
+      Exit;
+    end;
 
-      // ДОДАНО: Автоматичне отримання детального Z-звіту
-      Log('Отримання детального Z-звіту...');
-      if FReceiptAPI.GetZReportCurl(ShiftStatus.Id, ZReportResponse) then
+    // КРОК 2: Очікування фінального статусу CLOSED
+    Log('Крок 2: Очікування завершення закриття...');
+    FreeAndNil(ShiftStatus);
+
+    if not FReceiptAPI.WaitForShiftStatus(ShiftId, 'CLOSED', Response, ShiftStatus, 120) then // 120 сек таймаут
+    begin
+      Log('❌ Таймаут очікування закриття зміни: ' + Response);
+      ShowMessage('Не вдалося завершити закриття зміни вчасно. Спробуйте пізніше.');
+      Exit;
+    end;
+
+    if not Assigned(ShiftStatus) then
+    begin
+      Log('❌ Помилка: ShiftStatus = nil після очікування');
+      ShowMessage('Помилка: не вдалося отримати фінальний статус зміни');
+      Exit;
+    end;
+
+    // КРОК 3: Отримання Z-звіту
+    Log('Крок 3: Отримання детального Z-звіту...');
+
+    // Отримуємо ID Z-звіту з відповіді
+    ZReportId := ExtractZReportIdFromResponse(Response);
+
+    if ZReportId = '' then
+    begin
+      // Якщо не знайшли в Response, пробуємо отримати з ShiftStatus
+      if Assigned(ShiftStatus) and (ShiftStatus.ZReport <> '') then
       begin
-        Log('Детальний Z-звіт отримано успішно!');
-        Log('Z-звіт (фрагмент): ' + Copy(ZReportResponse, 1, 500));
+        ZReportId := ShiftStatus.ZReport;
+        Log('Отримано ZReportId з ShiftStatus: ' + ZReportId);
+      end
+      else
+      begin
+        Log('⚠️ Z-звіт не знайдено у відповіді. Спробуємо отримати останній звіт...');
+        // Можна додати логіку пошуку останнього Z-звіту для цієї зміни
+      end;
+    end;
 
-        // Парсимо та показуємо Z-звіт
+    // КРОК 4: Отримання та збереження різних форматів Z-звіту
+    if ZReportId <> '' then
+    begin
+      Log('Отримання детального Z-звіту ID: ' + ZReportId);
+
+      // 4.1 JSON версія
+      if FReceiptAPI.GetZReportCurl(ZReportId, ZReportResponse) then
+      begin
+        Log('✅ Детальний Z-звіт отримано успішно');
         ParseAndShowZReport(ZReportResponse);
       end
       else
       begin
-        Log('Не вдалося отримати детальний Z-звіт: ' + ZReportResponse);
+        Log('⚠️ Не вдалося отримати детальний Z-звіт: ' + FReceiptAPI.LastError);
       end;
 
-      // Очікуємо фінальний статус
-      FreeAndNil(ShiftStatus);
-      if FReceiptAPI.WaitForShiftStatus(ShiftId, 'CLOSED', Response, ShiftStatus) then
-      begin
-        if Assigned(ShiftStatus) then
-        begin
-          Log('Зміну успішно закрито зі звітом!');
-          Log('Фінальний статус: ' + ShiftStatus.Status);
+      // 4.2 Текстова версія
+      GetZReportTextAndSave(ZReportId);
 
-          // Оновлюємо інтерфейс
-          btnCloseShiftSimpleCurl.Enabled := False;
-          btnCloseShiftWithReportCurl.Enabled := False;
-          ClearShiftState; // Використовуємо нову процедуру
-        end;
-      end
-      else
-      begin
-        Log('Не вдалося отримати фінальний статус CLOSED: ' + Response);
-      end;
+      // 4.3 PNG версія
+      GetZReportPNGAndSave(ZReportId);
+
     end
     else
     begin
-      Log('Помилка закриття зміни зі звітом через CURL: ' + Response);
-      ShowMessage('Помилка закриття зміни: ' + Response);
+      Log('⚠️ ID Z-звіту не знайдено. Детальний звіт недоступний.');
+      ShowMessage('Зміну успішно закрито, але детальний Z-звіт недоступний.');
     end;
 
-    if Assigned(ShiftStatus) then
-      FreeAndNil(ShiftStatus);
+    // КРОК 5: Фіналізація
+    Log('✅ Зміну успішно закрито з отриманням Z-звіту!');
+    Log('Серійний номер: ' + IntToStr(ShiftStatus.Serial));
+    Log('Час закриття: ' + DateTimeToStr(ShiftStatus.ClosedAt));
 
-  finally
-    ShiftReport.Free;
-  end;
+    if Assigned(ShiftStatus.Balance) then
+    begin
+      Log('Фінальний баланс: ' + Format('%.2f грн', [ShiftStatus.Balance.Balance / 100]));
+    end;
+
+    // Оновлення інтерфейсу
+    btnCloseShiftSimpleCurl.Enabled := False;
+    btnCloseShiftWithReportCurl.Enabled := False;
+    ClearShiftState;
+
+    ShowMessage('Зміну успішно закрито!' + sLineBreak +
+               'Z-звіт збережено у різних форматах.' + sLineBreak +
+               'Перевірте папку: ' + receiptspath);
+
+  except
+    on E: Exception do
+    begin
+      Log('💥 Виняток при закритті зміни з Z-звітом: ' + E.Message);
+      ShowMessage('Критична помилка: ' + E.Message);
+    end;
+  end; // ЗАКРИТО: try блок
+
+  // Завершення - тепер це частина основного блоку
+  if Assigned(ShiftStatus) then
+    FreeAndNil(ShiftStatus);
+
+  btnCloseShiftWithReportCurl.Enabled := True;
+  Screen.Cursor := crDefault;
+
+  Log('=== ЗАВЕРШЕННЯ ЗАКРИТТЯ ЗМІНИ З Z-ЗВІТОМ ===');
+  Log('Час виконання: ' + IntToStr(SecondsBetween(Now, StartTime)) + ' сек');
 end;
-
 
 
 // ДОДАЄМО НОВУ ПРОЦЕДУРУ ДЛЯ ПАРСИНГУ ТА ВІДОБРАЖЕННЯ Z-ЗВІТУ
