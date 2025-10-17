@@ -10,7 +10,7 @@ uses
   LR_Class, LR_DBSet, LR_BarC, DKlient, DRek, dgssch, DGSer, dsch, splash,
   dsopl, otov, dndata, dvras, sprop, kredit, printers, Menus, EditBtn, dklgrupa,
   dklnt, dgtov, chekno, LCLType, ComCtrls, Spin, ReceiptWebAPI, DateUtils,
-  fpjson, jsonparser, jsonscanner,StrUtils, DB;
+  fpjson, jsonparser, jsonscanner,StrUtils, DB,  FiscalCheckViewer, uchekdb;
 
 type
 
@@ -204,6 +204,9 @@ type
     procedure rbPinCodeClick(Sender: TObject);
     procedure tsCashShow(Sender: TObject);
   private
+
+    FDBManager: TChekDBManager;
+
     Klient,schet:integer;
     datavv,nomer,psvid,nalkod,pnazva,pnazshort:string;
     reppath:string;
@@ -229,14 +232,16 @@ type
     FDepartamentFromIni: string;
     GoodsTaxGroup: integer; // з конфіг файлу група податків для товарів
 
+    function DBManagerReady: Boolean;
+
 
     procedure InitializeLogFile;     // Новий метод для ініціалізації логу
     procedure WriteLogToFile(const AMessage: string); // Метод запису в файл
 
-    procedure OpnCon;
-    procedure ClsCon;
-    procedure SavPos;
-    procedure RstPos;
+    //procedure OpnCon;
+    //procedure ClsCon;
+    //procedure SavPos;
+    //procedure RstPos;
     procedure VibSer;
     procedure Log(const AMessage: string); // Допоміжний метод для логування
     procedure UpdateCashRegisterStatus(const AMessage: string; AColor: TColor);
@@ -328,6 +333,9 @@ type
     procedure GetZReportTextAndSave(ReportId: string);
     procedure GetZReportPNGAndSave(ReportId: string);
 
+    procedure SafeCommitAndReopenConnection;
+    procedure LogDatabaseState;
+
   public
     { public declarations }
   end; 
@@ -348,6 +356,7 @@ begin
     WriteLogToFile('Час завершення: ' + DateTimeToStr(Now));
     WriteLogToFile('=====================' + sLineBreak);
   end;
+
  // Зберегти поточний стан зміни при закритті форми
  if Assigned(FReceiptAPI) and (FReceiptAPI.CurrentShiftId <> '') then
  begin
@@ -363,14 +372,26 @@ begin
      FReceiptAPI.HandleAuthState(aaClear);  // Очищення, якщо невалідний
  end;
 
- ClsCon;
+ // В FormClose замінити:
+  FDBManager.ClsCon;
+
+
+ // Звільнення менеджера БД
+ if Assigned(FDBManager) then
+ begin
+   Log('Звільнення менеджера БД...');
+   FreeAndNil(FDBManager);
+ end;
+
  // Звільнення пам'яті при закритті форми
  if Assigned(FReceiptAPI) then
     FreeAndNil(FReceiptAPI);
+
  for cr in FCashRegisters do
     if Assigned(cr) then
       cr.Free;
   SetLength(FCashRegisters, 0);
+
   Log('Застосунок завершує роботу');
 end;
 
@@ -381,6 +402,8 @@ begin
   FLastBalanceUpdate := 0;
   FIsProcessingFiscalization := False;
   GoodsTaxGroup:=8;
+  // Ініціалізація менеджера БД (поки що без параметрів, schet ще не відомий)
+  FDBManager := nil;
 end;
 
 procedure TFmChek.FormKeyDown(Sender: TObject;var Key: Word;Shift: TShiftState);
@@ -451,11 +474,11 @@ begin
    if MessageDlg('Дійсно хочете знищити рядок:'+#13+DMMag.QNDataNazva.AsString+' ?',mtWarning,[mbYes,mbNo,mbCancel],0)=mrYes
    then
    begin
-     SavPos;
-     ClsCon;
+     FDBManager.SavPos;
+     FDBManager.ClsCon;
      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'delete from nak_data where kod='+inttostr(pndata));
-     OpnCon;
-     RstPos;
+     FDBManager.OpnCon;
+     FDBManager.RstPos;
      DMMag.QNData.Last;
    end;
   end else MessageDlg('Знищення неможливе!',mtError,[mbOk],0);
@@ -484,17 +507,17 @@ begin
      FmNData.pereschet;
      if FmNData.ShowModal=mrOk then
      begin
-      SavPos;
+      FDBManager.SavPos;
       s:='update nak_data set data_vv='+
          #39+FormatDateTime('dd.mm.yyyy',Date)+#39+','+
          'kol='+FmNData.SpinEdit1.Text+','+
          'cena='+#39+FloatToStrF(round(FmNData.FloatSpinEdit2.Value*1000)/1000,ffGeneral,10,3,DMMag.fmt)+#39+','+
          'summa='+FmNData.Label10.Caption+' '+
          'where kod='+inttostr(pndata);
-      ClsCon;
+      FDBManager.ClsCon;
       DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,s);
-      OpnCon;
-      RstPos;
+      FDBManager.OpnCon;
+      FDBManager.RstPos;
      end;
   end;
 end;
@@ -881,6 +904,22 @@ begin
         Log('Початковий статус: ' + ReceiptStatusToString(ReceiptResponse.Status));
         Log('Фіскальний номер: ' + ReceiptResponse.FiscalCode);
 
+        // БЕЗПЕЧНЕ ЗБЕРЕЖЕННЯ ДАНИХ У БД
+          try
+            Log('Поточний стан БД перед комітом:');
+            LogDatabaseState;
+            SafeCommitAndReopenConnection;
+            Log('Стан БД після коміту:');
+            LogDatabaseState;
+          except
+            on E: Exception do
+            begin
+              Log('❌ Помилка збереження даних в БД: ' + E.Message);
+              // Не перериваємо процес, але логуємо помилку
+              // Користувач отримав фіскальний чек, навіть якщо збереження в БД не вдалося
+            end;
+          end;
+
         HandleSuccessfulFiscalization(CheckID, Receipt, ReceiptResponse);
 
         // ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ПОСЛЯ ФІСКАЛІЗАЦІЇ
@@ -896,10 +935,27 @@ begin
         if FReceiptAPI.GetReceiptPNG(ReceiptResponse.Id, LPNGFileName, 30, 58, 75) then
         begin
           Log('✓ PNG зображення отримано: ' + ExtractFileName(LPNGFileName));
+
+          // ПЕРЕВІРКА ПЕРЕД ПОКАЗОМ
+          Log('Перевірка файлу перед показом:');
+          Log('Повний шлях: ' + LPNGFileName);
+          Log('Файл існує: ' + BoolToStr(FileExists(LPNGFileName), True));
+
+          if FileExists(LPNGFileName) then
+          begin
+            Log('Розмір файлу: ' + IntToStr(FileSize(LPNGFileName)) + ' байт');
+            ShowCheck(LPNGFileName);
+          end
+          else
+          begin
+            Log('❌ Файл не знайдено після отримання!');
+            ShowMessage('Файл чеку не знайдено: ' + ExtractFileName(LPNGFileName));
+          end;
         end
         else
         begin
           Log('✗ Помилка отримання PNG: ' + FReceiptAPI.LastError);
+          ShowMessage('Не вдалося отримати зображення чека: ' + FReceiptAPI.LastError);
         end;
 
         // 2. Отримуємо QR-код
@@ -918,7 +974,7 @@ begin
         if FReceiptAPI.GetReceiptHTML(ReceiptResponse.Id, LHTMLContent) then
         begin
           Log('✓ HTML представлення отримано');
-          SaveStringToFile(FReceiptAPI.ReceiptsDirectory + 'receipt_' + ReceiptResponse.Id + '.html', LHTMLContent);
+          SaveStringToFile(FReceiptAPI.ReceiptsDirectory + '/receipt_' + ReceiptResponse.Id + '.html', LHTMLContent);
         end
         else
         begin
@@ -930,7 +986,7 @@ begin
         if FReceiptAPI.GetReceiptText(ReceiptResponse.Id, LTextContent) then
         begin
           Log('✓ Текстове представлення отримано');
-          SaveStringToFile(FReceiptAPI.ReceiptsDirectory + 'receipt_' + ReceiptResponse.Id + '.txt', LTextContent);
+          SaveStringToFile(FReceiptAPI.ReceiptsDirectory + '/receipt_' + ReceiptResponse.Id + '.txt', LTextContent);
         end
         else
         begin
@@ -1101,6 +1157,7 @@ begin
     FreeAndNil(ReceiptResponse);
 end;
 
+
 procedure TFmChek.btnCreateCheckClick(Sender: TObject);
 var
   s: string;
@@ -1108,8 +1165,8 @@ var
 begin
   if (schet > 0) then
   begin
-    SavPos;
-    ClsCon;
+    FDBManager.SavPos;
+    FDBManager.ClsCon;
 
     // Створення чека з новими полями
     s := 'insert into chek(schet,summa,dengi,sdacha,dolg,prim,printed,' +
@@ -1122,8 +1179,8 @@ begin
 
     DMMag.LaunchQuery(DMMag.SQLQ, DMMag.TrMag, s);
 
-    OpnCon;
-    RstPos;
+    FDBManager.OpnCon;
+    FDBManager.RstPos;
     DMMag.QChek.Last;
 
     // ДОДАНО: Отримання ID створеного чека та оновлення інформації про оплату
@@ -1142,59 +1199,6 @@ begin
     messagedlg('Операція неможлива(рахунок/місце зберігання?) !', mtError, [mbOk], 0);
 end;
 
-(*
-procedure TFmChek.BitBtn10Click(Sender: TObject);
-var s,z:string; dalee:boolean;zs,cs:integer;
-begin
-  if (not DMMag.QChekKod.IsNull) and (schet>0) then
-  begin
-   repeat
-    FmOTov.OpenCon;
-    if FmOtov.ShowModal=mrOk then
-    begin
-     FmNData.DateEdit1.Date:=Date;
-     FmNData.Label12.Caption:=DMMag.QOTNAZVA.AsString;
-     FmNData.SpinEdit1.MaxValue:=DMMag.QOTKOL.AsInteger;
-     FmNData.SpinEdit1.Value:=1;
-     FmNData.FloatSpinEdit2.Value:=DMMag.QOTCENA.AsFloat;
-     FmNData.Label5.Caption:=DMMag.QOTED.AsString;
-     FmNData.pereschet;
-     if FmNData.ShowModal=mrOk then
-     begin
-      dalee:=true;
-      SavPos;
-      s:='insert into nak_data(chek,schet,data_vv,tovar,ed,kol,cena,cena_prih,summa,summa_prih,otdel,tip,cena_sklad) values('+
-         DMMag.QChekKOD.AsString+','+inttostr(schet)+','+
-         #39+FormatDateTime('dd.mm.yyyy',Date)+#39+','+
-         DMMag.QOTTOVAR.AsString+','+
-         #39+DMMag.QOTED.AsString+#39+','+
-         FmNData.SpinEdit1.Text+','+
-         #39+FloatToStrF(round(FmNData.FloatSpinEdit2.Value*1000)/1000,ffGeneral,10,3,DMMag.fmt)+#39+','+
-         #39+FloatToStrF(round(DMMag.QOTCENA_PRIH.AsFloat*100)/100,ffGeneral,10,2,DMMag.fmt)+#39+','+
-         FmNData.Label10.Caption+','+
-         FmNData.SpinEdit1.Text+'*'+FloatToStrF(round(DMMag.QOTCENA_PRIH.AsFloat*100)/100,ffGeneral,10,2,DMMag.fmt)+','+
-         DMMag.QOTOTDEL.AsString+','+
-         DMMag.QOTTIP.AsString+','+
-         #39+FloatToStrF(round(FmNData.FloatSpinEdit2.Value*1000)/1000,ffGeneral,10,3,DMMag.fmt)+#39+')';
-      z:='select count(s.kod) from serijnik s, prih_data p where (s.nak_data is null) and s.sklad='+inttostr(DMMag.otdel)+
-         'and s.prih_data=p.kod and p.tovar='+DMMag.QOTTOVAR.AsString;
-      cs:=FmNData.SpinEdit1.Value;
-      FmOTov.CloseCon;
-      ClsCon;
-      //if messagedlg(s,mtinformation,[mbok,mbcancel],0)=mrOk then
-      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,s);
-      //DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'execute procedure podschet_summa_sch('+inttostr(sc)+')');
-      zs:=DMMag.Zapros('count',z);
-      OpnCon;
-      RstPos;
-      DMMag.QNData.Last;
-      if zs>0 then if cs=1 then VibSer else messagedlg('Не забудьте вказати серійні номери.',mtinformation,[mbok],0);
-     end else dalee:=false;
-    end else begin dalee:=false; FmOTov.CloseCon;end;
-   until not dalee;
-  end else messagedlg('Спочатку відкрийте новий чек!',mtwarning,[mbok],0);
-end;
-*)
 procedure TFmChek.BitBtn10Click(Sender: TObject);
 var
   s, z: string;
@@ -1218,7 +1222,7 @@ begin
         if FmNData.ShowModal = mrOk then
         begin
           dalee := true;
-          SavPos;
+          FDBManager.SavPos;
           s := 'insert into nak_data(chek,schet,data_vv,tovar,ed,kol,cena,cena_prih,summa,summa_prih,otdel,tip,cena_sklad) values(' +
                DMMag.QChekKOD.AsString + ',' + inttostr(schet) + ',' +
                #39 + FormatDateTime('dd.mm.yyyy', Date) + #39 + ',' +
@@ -1236,11 +1240,11 @@ begin
                ' and s.prih_data=p.kod and p.tovar=' + DMMag.QOTTOVAR.AsString;
           cs := FmNData.SpinEdit1.Value;
           FmOTov.CloseCon;
-          ClsCon;
+          FDBManager.ClsCon;
           DMMag.LaunchQuery(DMMag.SQLQ, DMMag.TrMag, s);
           zs := DMMag.Zapros('count', z);
-          OpnCon;
-          RstPos;
+          FDBManager.OpnCon;
+          FDBManager.RstPos;
           DMMag.QNData.Last;
 
           // ДОДАНО: Оновлення інформації про оплату після додавання товару
@@ -1289,8 +1293,8 @@ begin
    then
    begin
      nch:=DMMag.QChekNOMER.AsInteger;
-     SavPos;
-     ClsCon;
+     FDBManager.SavPos;
+     FDBManager.ClsCon;
 
      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'delete from chek where kod='+inttostr(pchek));
      if nch=DMMag.Zapros('cheknomer','select p.cheknomer from prodavec p,rekvizit r,schet s where s.kod='+inttostr(schet)+' and s.rekvizit=r.kod and p.kod=r.prodavec')
@@ -1299,8 +1303,8 @@ begin
      else messagedlg('Увага! Знищено чек №'+inttostr(nch)+'. Він не був останнім у списку - тому номерацію не змінено!',mtWarning,[mbOk],0);
 
 
-     OpnCon;
-     RstPos;
+     FDBManager.OpnCon;
+     FDBManager.RstPos;
      DMMag.QChek.Last;
    end;
 
@@ -1308,7 +1312,7 @@ begin
   end else messagedlg('Операція неможлива!',mtError,[mbOk],0);
 end;
 
-procedure TFmChek.SavPos;
+{procedure TFmChek.SavPos;
 begin
   pndata:=0;
   pchek:=0;
@@ -1319,7 +1323,7 @@ procedure TFmChek.RstPos;
 begin
  if pchek>0 then DMMag.QChek.Locate('kod',pchek,[]);
  if pndata>0 then DMMag.QNData.Locate('kod',pndata,[]);
-end;
+end;}
 
 procedure TFmChek.VibSer;
 begin
@@ -1338,11 +1342,11 @@ begin
     FmDGSer.Label1.Caption:=DMMag.QNDataNAZVA.AsString;
     if (FmDGSer.showmodal=mrOk) and (FmDGSer.kod>0) then
     begin
-     SavPos;
-     ClsCon;
+     FDBManager.SavPos;
+     FDBManager.ClsCon;
      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'update serijnik set nak_data='+inttostr(pndata)+' where kod='+inttostr(FmDGSer.kod));
-     OpnCon;
-     RstPos;
+     FDBManager.OpnCon;
+     FDBManager.RstPos;
     end;
     DMMag.QOstSer.Active:=false;
  end
@@ -1361,12 +1365,12 @@ begin
   if  (not DMMag.QChekKOD.IsNull) and
       (not DMMag.QNDataKOD.IsNull) and (not DMMag.QNSerKOD.IsNull) then
   begin
-      SavPos;
+      FDBManager.SavPos;
       sk:=DMMag.QNSerKOD.AsInteger;
-      ClsCon;
+      FDBManager.ClsCon;
       DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'update serijnik set nak_data=null where kod='+inttostr(sk));
-      OpnCon;
-      RstPos;
+      FDBManager.OpnCon;
+      FDBManager.RstPos;
   end
   else MessageDlg('Операція неможлива!',mtError,[mbOk],0);
 end;
@@ -1375,30 +1379,11 @@ end;
 procedure TFmChek.btnCheckPrintClick(Sender: TObject);
 var nch:integer;
 begin
-  (*// Для службових чеків - друк без перевірки фіскалізації
-  if not DMMag.QChekFISCAL_STATUS.IsNull and
-     (DMMag.QChekFISCAL_STATUS.AsString = 'NON_FISCAL') then
-  begin
-    if MessageDlg('Друк службового чека',
-        'Це службовий чек - він не буде фіскалізований. Продовжити друк?',
-        mtConfirmation, [mbYes, mbNo], 0) = mrYes then
-    begin
-      // Друк з спеціальним шаблоном для службових чеків
-      frReport1.LoadFromFile(reppath+'/non_fiscal_chek.lrf');
-      frReport1.ShowReport;
-    end;
-    Exit;
-  end; *)
-
-
-
-
-
 
   if DMMag.QChekNOMER.IsNull then
   begin
-    SavPos;
-    ClsCon;
+    FDBManager.SavPos;
+    FDBManager.ClsCon;
     nch:=DMMag.Zapros('cheknomer','select p.cheknomer from prodavec p,rekvizit r,schet s where s.kod='+inttostr(schet)+' and s.rekvizit=r.kod and p.kod=r.prodavec')+1;
     if nch<1 then nch:=1;
     FmChekno.SpinEdit1.Value:=nch;
@@ -1410,8 +1395,8 @@ begin
      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'update prodavec set cheknomer='+inttostr(nch)+' where kod in '+
                                                '(select p.kod from prodavec p,rekvizit r,schet s where s.kod='+inttostr(schet)+' and s.rekvizit=r.kod and p.kod=r.prodavec)');
     end;
-    OpnCon;
-    RstPos;
+    FDBManager.OpnCon;
+    FDBManager.RstPos;
   end;
   //DMMag.QConf.Active:=true;
   frDBDataSet1.DataSource:=DMMag.DSNData;
@@ -1420,17 +1405,6 @@ begin
   frReport1.ShowReport;
   //DMMag.QConf.Active:=false;
 
-  (*//-------фіскалізація
-  if not IsCheckFiscalized(DMMag.QChekKOD.AsInteger) then
-  begin
-    if MessageDlg('Фіскалізація',
-        'Чек ще не фіскалізований. Бажаєте спочатку виконати фіскалізацію?',
-        mtConfirmation, [mbYes, mbNo], 0) = mrYes then
-    begin
-      btbtnSendReceiptCurlClick(Sender);
-      Exit;
-    end;
-  end;*)
 end;
 
 procedure TFmChek.btnWarrantyClick(Sender: TObject);
@@ -1731,8 +1705,8 @@ begin
    if  (schet>0) then
    begin
     cn:=DMMag.QChekNOMER.AsInteger;
-    SavPos;
-    ClsCon;
+    FDBManager.SavPos;
+    FDBManager.ClsCon;
     pr:=DMMag.Zapros('prodavec','select r.prodavec from rekvizit r,schet s where s.kod='+inttostr(schet)+' and s.rekvizit=r.kod');
   //  max:=DMMag.Zapros('max','select max(c.nomer) from chek c,rekvizit r,schet s where s.kod=c.schet and s.rekvizit=r.kod and r.prodavec='+inttostr(pr));
     if {(cn=max) and} (messagedlg('Ви дійсно хочете відмінити чек №'+inttostr(cn)+ ' ?',mtWarning,[mbYes,mbNo],0)=mrYes)
@@ -1743,8 +1717,8 @@ begin
                                               '(select p.kod from prodavec p,rekvizit r,schet s where s.kod='+inttostr(schet)+' and s.rekvizit=r.kod and p.kod=r.prodavec)');
      end;
     //else messagedlg('Відмінити можна тільки останній чек!'+#13+' (номер чека='+inttostr(cn)+#13+' номер останнього='+inttostr(max)+')',mtinformation,[mbok,mbcancel],0);
-    OpnCon;
-    RstPos;
+    FDBManager.OpnCon;
+    FDBManager.RstPos;
    end;
 end;
 
@@ -1754,8 +1728,8 @@ var
 begin
   if (schet > 0) then
   begin
-    SavPos;
-    ClsCon;
+    FDBManager.SavPos;
+    FDBManager.ClsCon;
 
     // Створюємо чек зі статусом NON_FISCAL
     s := 'insert into chek(schet,summa,dengi,sdacha,dolg,prim,printed,fiscal_status) '+
@@ -1766,8 +1740,8 @@ begin
           #39+'NON_FISCAL'+#39+')';
 
     DMMag.LaunchQuery(DMMag.SQLQ, DMMag.TrMag, s);
-    OpnCon;
-    RstPos;
+    FDBManager.OpnCon;
+    FDBManager.RstPos;
     DMMag.QChek.Last;
 
     Log('Створено службовий чек');
@@ -3357,6 +3331,8 @@ begin
   try // ДОДАНО: try для блоку finally
     // КРОК 1: Закриття зміни (аналогічно простому закриттю)
     Log('Крок 1: Закриття зміни...');
+    FReceiptAPI.ReceiptsDirectory := receiptspath;
+    FReceiptAPI.TempDirectory := temppath;
     Success := FReceiptAPI.CloseShiftSimpleCurl(ShiftId, Response, ShiftStatus);
 
     if not Success then
@@ -3652,6 +3628,12 @@ begin
 
   DMMag.TrMag.Commit;
 
+  // ІНІЦІАЛІЗАЦІЯ МЕНЕДЖЕРА БД ПІСЛЯ ОТРИМАННЯ SCHET
+  if Assigned(FDBManager) then
+    FreeAndNil(FDBManager);
+  FDBManager := TChekDBManager.Create(DMMag, @Self.Log, schet);
+  Log('✅ Менеджер БД ініціалізовано з schet=' + IntToStr(schet));
+
   DMMag.QChek.SQL.Clear;
   DMMag.QChek.SQL.Add('select * from chek where schet='+inttostr(schet)+' order by kod');
   {-------------------------------}
@@ -3660,7 +3642,8 @@ begin
   DMMag.schb3:=false;
   DmMag.frk:=0;
   DmMag.ssort:=2;
-  OpnCon;
+
+  FDBManager.OpnCon;
   DMMag.QChek.Last;
 
   // 2. Ініціалізація логу
@@ -3914,20 +3897,31 @@ end;
 
 
 { TFmChek }
-procedure TFmChek.OpnCon;
+{procedure TFmChek.OpnCon;
 begin
-  DMMag.TrMag.StartTransaction;
-  DMMag.QNSer.Active:=true;
-  DMMag.QNData.Active:=true;
-  DMMag.QChek.Active:=true;
+  if not DMMag.TrMag.Active then  // Додана перевірка
+    DMMag.TrMag.StartTransaction;
+  if not DMMag.QNSer.Active then  // Додана перевірка
+    DMMag.QNSer.Active := True;
+  if not DMMag.QNData.Active then  // Додана перевірка
+    DMMag.QNData.Active := True;
+  if not DMMag.QChek.Active then  // Додана перевірка
+    DMMag.QChek.Active := True;
+  Log('Відкрито зʼєднання з БД');
 end;
+
 procedure TFmChek.ClsCon;
 begin
-  DMMag.QChek.Active:=false;
-  DMMag.QNData.Active:=false;
-  DMMag.QNSer.Active:=false;
-  DMMag.TrMag.Commit;
-end;
+  if DMMag.QChek.Active then  // Додана перевірка
+    DMMag.QChek.Active := False;
+  if DMMag.QNData.Active then  // Додана перевірка
+    DMMag.QNData.Active := False;
+  if DMMag.QNSer.Active then  // Додана перевірка
+    DMMag.QNSer.Active := False;
+  if DMMag.TrMag.Active then  // Додана перевірка
+    DMMag.TrMag.Commit;
+  Log('Закрито зʼєднання з БД');
+end;  }
 
 
 procedure TFmChek.Log(const AMessage: string);
@@ -5206,14 +5200,14 @@ var
   s: string;
 begin
   try
-    SavPos;
-    ClsCon;
+    FDBManager.SavPos;
+    FDBManager.ClsCon;
 
     s := 'UPDATE CHEK SET PRINTED = 1 WHERE KOD = ' + IntToStr(CheckID);
     DMMag.LaunchQuery(DMMag.SQLQ, DMMag.TrMag, s);
 
-    OpnCon;
-    RstPos;
+    FDBManager.OpnCon;
+    FDBManager.RstPos;
 
     Log('Чек позначено як надрукований: ' + IntToStr(CheckID));
   except
@@ -6586,7 +6580,7 @@ begin
   if FReceiptAPI.GetReportText(ReportId, ReportText) then  // Змінили на GetReportText (без Curl)
   begin
     FileName := 'zreport_' + ReportId + '_' + FormatDateTime('yyyy-mm-dd_hh-nn-ss', Now) + '.txt';
-    SaveStringToFile(FReceiptAPI.TempDirectory + FileName, ReportText);  // Змінили GetTempPath на FReceiptAPI.TempDirectory
+    SaveStringToFile(temppath +'/'+ FileName, ReportText);  // Змінили GetTempPath на FReceiptAPI.TempDirectory
     Log('Текст Z-звіту збережено: ' + FileName);
 
     // Показуємо фрагмент звіту
@@ -6604,7 +6598,7 @@ var
   FileName: string;
   Success: Boolean;
 begin
-  FileName := FReceiptAPI.ReceiptsDirectory + 'zreport_' + ReportId + '_' +  // Змінили GetReceiptsPath на FReceiptAPI.ReceiptsDirectory
+  FileName := receiptspath + '/zreport_' + ReportId + '_' +  // Змінили GetReceiptsPath на FReceiptAPI.ReceiptsDirectory
               FormatDateTime('yyyy-mm-dd_hh-nn-ss', Now) + '.png';
 
   Success := FReceiptAPI.GetReportPNG(ReportId, FileName);  // Змінили на GetReportPNG (без Curl)
@@ -6617,6 +6611,136 @@ begin
   begin
     Log('Не вдалося отримати PNG Z-звіт');
   end;
+end;
+
+procedure TFmChek.LogDatabaseState;
+begin
+  Log('=== СТАН БАЗИ ДАНИХ ===');
+  Log('QChek активний: ' + BoolToStr(DMMag.QChek.Active, True) +
+      ', записів: ' + IntToStr(DMMag.QChek.RecordCount));
+  Log('QNData активний: ' + BoolToStr(DMMag.QNData.Active, True) +
+      ', записів: ' + IntToStr(DMMag.QNData.RecordCount));
+  Log('Транзакція активна: ' + BoolToStr(DMMag.TrMag.Active, True));
+
+  if not DMMag.QChekKOD.IsNull then
+    Log('Поточний чек: KOD=' + DMMag.QChekKOD.AsString +
+        ', NOMER=' + DMMag.QChekNOMER.AsString);
+
+  if not DMMag.QNDataKOD.IsNull then
+    Log('Поточний рядок: KOD=' + DMMag.QNDataKOD.AsString +
+        ', NAZVA=' + DMMag.QNDataNAZVA.AsString);
+
+  Log('========================');
+end;
+
+procedure TFmChek.SafeCommitAndReopenConnection;
+var
+  SavedChekPos, SavedNDataPos: Integer;
+  WasInTransaction: Boolean;
+begin
+  SavedChekPos := 0;
+  SavedNDataPos := 0;
+  WasInTransaction := False;
+
+  try
+    Log('🔁 SafeCommitAndReopenConnection: Початок безпечного коміту та перевідкриття зʼєднання');
+
+    // 1. Збереження позицій курсорів
+    if not DMMag.QChekKOD.IsNull then
+      SavedChekPos := DMMag.QChekKOD.AsInteger;
+
+    if not DMMag.QNDataKOD.IsNull then
+      SavedNDataPos := DMMag.QNDataKOD.AsInteger;
+
+    Log(Format('Збережено позиції: Chek=%d, NData=%d', [SavedChekPos, SavedNDataPos]));
+
+    // 2. Перевірка та коміт транзакції
+    WasInTransaction := DMMag.TrMag.Active;
+    if WasInTransaction then
+    begin
+      Log('Виконується коміт активной транзакції...');
+      DMMag.TrMag.Commit;
+      Log('✅ Транзакцію успішно закомічено');
+    end
+    else
+    begin
+      Log('ℹ️ Активної транзакції не знайдено, продовжуємо...');
+    end;
+
+    // 3. Закриття зʼєднань
+    Log('Закриття зʼєднань з БД...');
+    if DMMag.QChek.Active then
+      DMMag.QChek.Active := False;
+    if DMMag.QNData.Active then
+      DMMag.QNData.Active := False;
+    if DMMag.QNSer.Active then
+      DMMag.QNSer.Active := False;
+
+    // 4. Перевідкриття зʼєднань
+    Log('Перевідкриття зʼєднань з БД...');
+    DMMag.TrMag.StartTransaction;
+    DMMag.QNSer.Active := True;
+    DMMag.QNData.Active := True;
+    DMMag.QChek.Active := True;
+    Log('✅ Зʼєднання з БД успішно перевідкрито');
+
+    // 5. Відновлення позицій курсорів
+    Log('Відновлення позицій курсорів...');
+
+    if SavedChekPos > 0 then
+    begin
+      if DMMag.QChek.Locate('KOD', SavedChekPos, []) then
+        Log(Format('✅ Позицію Chek відновлено: KOD=%d', [SavedChekPos]))
+      else
+        Log('⚠️ Не вдалося відновити позицію Chek, використовується перший запис');
+    end;
+
+    if SavedNDataPos > 0 then
+    begin
+      if DMMag.QNData.Locate('KOD', SavedNDataPos, []) then
+        Log(Format('✅ Позицію NData відновлено: KOD=%d', [SavedNDataPos]))
+      else
+        Log('⚠️ Не вдалося відновити позицію NData, використовується перший запис');
+    end;
+
+    Log('✅ SafeCommitAndReopenConnection успішно завершено');
+
+  except
+    on E: Exception do
+    begin
+      Log('❌ ПОМИЛКА в SafeCommitAndReopenConnection: ' + E.Message);
+
+      // Спроба аварійного відновлення
+      try
+        if DMMag.TrMag.Active then
+          DMMag.TrMag.Rollback;
+
+        // Повторна ініціалізація зʼєднання
+        DMMag.TrMag.StartTransaction;
+        DMMag.QNSer.Active := True;
+        DMMag.QNData.Active := True;
+        DMMag.QChek.Active := True;
+
+        Log('🔄 Зʼєднання з БД аварійно відновлено');
+      except
+        on E2: Exception do
+        begin
+          Log('💥 КРИТИЧНА ПОМИЛКА: не вдалося відновити зʼєднання з БД: ' + E2.Message);
+          raise; // Перевикидання винятку для обробки вище
+        end;
+      end;
+
+      // Перевикидання оригінального винятку
+      raise;
+    end;
+  end;
+end;
+
+function TFmChek.DBManagerReady: Boolean;
+begin
+  Result := Assigned(FDBManager) and (schet > 0);
+  if not Result then
+    Log('Попередження: менеджер БД не готовий до роботи');
 end;
 
 
