@@ -9,6 +9,10 @@ uses
   regexpr, dateutils, inifiles, TypInfo, Math, StrUtils;
 
 type
+
+  TReportType = (rtXReport, rtZReport);
+
+
   TAuthAction = (aaSave, aaClear, aaLoad);  // Новий тип для дій з авторизацією
   // Тип для операцій з готівкою
   TCashOperationType = (cotCashIn, cotCashOut);
@@ -656,7 +660,6 @@ type
     FLastError: string; // Додаємо поле для помилок
     FReceiptsDirectory: string;
     FTempDirectory: string;
-    //FAuthToken: string; // Для зворотньої сумісності
     FAuthInfo: TAuthInfo;
     FUsername: string;
     FPassword: string;
@@ -669,11 +672,8 @@ type
     FLastBalanceUpdate: TDateTime;
     FBalanceUpdateInterval: Integer;
 
-    //FAccessToken: string; // Токен авторизації
-    //FTokenExpiration: TDateTime; // Час закінчення дії токена
     FLastCashRegisterUpdate: TDateTime; // Час останнього оновлення кас
     FLastCashRegisterResponse: string; // Кешована відповідь
-    //function ValidateAPIState: Boolean;
 
     function DiscountTypeToString(ADiscountType: TDiscountType): string;
     function DiscountModeToString(ADiscountMode: TDiscountMode): string;
@@ -746,7 +746,6 @@ type
     function LogoutCurl(out AResponse: string): Boolean;
     function IsTokenValid: Boolean;
     procedure SetLogProcedure(ALogProcedure: TLogProcedure);
-    function GetCurrentCashierInfo(var Response: string): Boolean;
 
     function SendReceiptCurl(AReceipt: TReceipt; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
     function GetReceiptEndpoint(AReceiptType: TReceiptType): string;
@@ -782,17 +781,12 @@ type
     function GetCurrentShiftIdCurl(out AResponse: string): string;
     function RecoverShift(out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
     function GetZReportCurl(const AShiftId: string; out AResponse: string): Boolean;
-    function GetReportText(const AReportId: string; out ATextContent: string;
-               const AWidth: Integer = 0): Boolean;
-    function GetReportPNG(const AReportId: string; out AFileName: string;
-               const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
     function CloseCurrentShiftCurl(out AResponse: string;out AShiftStatus: TShiftStatus): Boolean;
     function GetShiftReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetShiftBalance(out ABalance: Integer; out AResponse: string): Boolean;
     function GetShiftBalanceDirect(out ABalance: Integer; out AResponse: string): Boolean;
     procedure SaveBalanceData(JsonData: TJSONObject);
     function GetBalanceData: TShiftBalanceData;
-    //function GetShiftZReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetShiftXReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetCurrentBalance(out AResponse: string): Integer;
     function ForceBalanceUpdate(out AResponse: string): boolean;
@@ -847,10 +841,12 @@ type
 
     // Для роботи з Z-звітами
     function GetShiftZReportCurl(const AReportId: string; out AResponse: string): Boolean;
-    function GetZReportText(const AReportId: string; out ATextContent: string): Boolean;
-    function GetZReportPNG(const AReportId: string; out AFileName: string;
-      const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
     function ExtractZReportIdFromCloseResponse(const AResponse: string): string;
+    function GetSummaryReportText(const AReportId: string; out ATextContent: string;
+      const AReportType: TReportType; const AWidth: Integer = 0): Boolean;
+    function GetSummaryReportPNG(const AReportId: string; out AFileName: string;
+      const AReportType: TReportType; const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
+
 
   end;
 
@@ -1192,7 +1188,6 @@ end;
 { TBalanceInfo }
 destructor TBalanceInfo.Destroy;
 begin
-  // Поки що нічого звільняти не потрібно, оскільки клас не містить складних об'єктів
   inherited Destroy;
 end;
 
@@ -1330,7 +1325,6 @@ end;
 destructor TTransaction.Destroy;
 var I:integer;
 begin
-  // В деструкторе каждого класса добавить:
   for I := 0 to High(Signatures) do
   if Assigned(Signatures[I]) then
     FreeAndNil(Signatures[I]);
@@ -1343,7 +1337,6 @@ end;
 destructor TCashier.Destroy;
 var I:integer;
 begin
-  // В деструкторе каждого класса добавить:
   for I := 0 to High(Signatures) do
   if Assigned(Signatures[I]) then
     FreeAndNil(Signatures[I]);
@@ -1362,7 +1355,6 @@ end;
 {  TReceiptCustomFields }
 destructor TReceiptCustomFields.Destroy;
 begin
-  // Вивільняємо всі рядкові поля
   ReceiptNumber := '';
   CustomerName := '';
   CustomerAddress := '';
@@ -1403,10 +1395,8 @@ constructor TReceiptWebAPI.Create(ABaseURL, AClientName, AClientVersion,
 begin
   inherited Create;
 
-  // ✅ СПОЧАТКУ створюємо всі об'єкти
   FAuthInfo := TAuthInfo.Create; // Вже ініціалізує поля за замовчуванням
 
-  // Потім ініціалізуємо прості поля
   FBaseURL := ABaseURL;
   FClientName := AClientName;
   FClientVersion := AClientVersion;
@@ -3164,8 +3154,6 @@ begin
 
   try
     // Формуємо curl команду
-    //Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" -H "X-Client-Version: %s" -H "Authorization: Bearer %s" "%s/cash-registers/%s"',
-    //  [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, ACashRegisterId]);
     Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" -H "X-Client-Version: %s" -H "Authorization: Bearer %s" "%s/api/v1/cash-registers/%s"',
          [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, ACashRegisterId]);
 
@@ -3354,14 +3342,7 @@ begin
     else
       Result.Add('id', AShiftId);
 
-    // ВИДАЛЯЄМО fiscal_code - сервер не потребує його
-    // if AFiscalCode <> '' then
-    //   Result.Add('fiscal_code', AFiscalCode);
-
-    // ВИДАЛЯЄМО дублювання offline_mode
     Result.Add('offline_mode', True); // Тільки один раз
-
-    // Додаємо дату (якщо потрібно)
     if AFiscalDate <> '' then
       Result.Add('fiscal_date', AFiscalDate);
 
@@ -7592,106 +7573,6 @@ begin
   Result := (APrice * ATaxRate) / (100 + ATaxRate);
 end;
 
-(*function TReceiptWebAPI.ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
-var
-  I: Integer;
-  TotalGoodsSum, TotalPaymentsSum: Integer;
-begin
-  Result := False;
-
-  // Перевірка базових полів
-  if AReceipt.Id = '' then
-  begin
-    AError := 'Відсутній ID чека';
-    Exit;
-  end;
-
-  if not IsValidUUID(AReceipt.Id) then
-  begin
-    AError := 'Невірний формат UUID';
-    Exit;
-  end;
-
-  if AReceipt.CashierName = '' then
-  begin
-    AError := 'Відсутнє ім''я касира';
-    Exit;
-  end;
-
-  // Перевірка товарів
-  if Length(AReceipt.Goods) = 0 then
-  begin
-    AError := 'Чек повинен містити хоча б один товар';
-    Exit;
-  end;
-
-  TotalGoodsSum := 0;
-  for I := 0 to High(AReceipt.Goods) do
-  begin
-    if AReceipt.Goods[I].Good.Code = '' then
-    begin
-      AError := Format('Товар %d: відсутній код', [I+1]);
-      Exit;
-    end;
-
-    if AReceipt.Goods[I].Good.Price <= 0 then
-    begin
-      AError := Format('Товар %s: некоректна ціна', [AReceipt.Goods[I].Good.Code]);
-      Exit;
-    end;
-
-    if AReceipt.Goods[I].Quantity <= 0 then
-    begin
-      AError := Format('Товар %s: некоректна кількість', [AReceipt.Goods[I].Good.Code]);
-      Exit;
-    end;
-
-    // Розрахунок загальної суми товарів
-    TotalGoodsSum := TotalGoodsSum + AReceipt.Goods[I].Sum;
-  end;
-
-  // Перевірка оплат
-  if Length(AReceipt.Payments) = 0 then
-  begin
-    AError := 'Відсутні оплати';
-    Exit;
-  end;
-
-  TotalPaymentsSum := 0;
-  for I := 0 to High(AReceipt.Payments) do
-  begin
-    if AReceipt.Payments[I].Value <= 0 then
-    begin
-      AError := Format('Оплата %d: некоректна сума', [I+1]);
-      Exit;
-    end;
-    TotalPaymentsSum := TotalPaymentsSum + AReceipt.Payments[I].Value;
-  end;
-
-  // Перевірка співпадіння сум
-  if Abs(TotalGoodsSum - AReceipt.TotalSum) > 1 then // Допуск 1 копійка
-  begin
-    AError := Format('Неспівпадіння сум: товари=%d, total_sum=%d',
-      [TotalGoodsSum, AReceipt.TotalSum]);
-    Exit;
-  end;
-
-  // Перевірка решти
-  if AReceipt.TotalPayment < AReceipt.TotalSum then
-  begin
-    AError := 'Недостатня сума оплати';
-    Exit;
-  end;
-
-  if AReceipt.Rest <> (AReceipt.TotalPayment - AReceipt.TotalSum) then
-  begin
-    AError := 'Некоректний розрахунок решти';
-    Exit;
-  end;
-
-  Result := True;
-end; *)
-
 function TReceiptWebAPI.ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
 var
   I, J, TotalPayment, TotalGoodsSum: Integer;
@@ -8089,144 +7970,6 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.GetCurrentCashierInfo(var Response: string): Boolean;
-var
-  Command, Url: string;
-  TempResponse: string;
-begin
-   // -----  НЕ ПРАЦЮЄ  !!!!!-------------
-
-
-(*  Result := False;
-  Response := '';
-
-  // Перевірка валідності токена
-  if not IsTokenValid then
-  begin
-    Response := 'Токен недійсний';
-    Log('Помилка: Токен недійсний для отримання інформації про касира');
-    Exit;
-  end;
-
-  // Перевірка заповненості обов'язкових полів
-  if (FAuthInfo.Token = '') or (FClientName = '') or (FClientVersion = '') then
-  begin
-    Response := 'Відсутні обовʼязкові дані для запиту (токен, клієнт, версія)';
-    Log('Помилка: Недостатньо даних для формування запиту');
-    Exit;
-  end;
-
-  try
-    // Використовуємо правильний ендпоінт з документації
-    Url := FBaseURL + '/api/v1/cashiers/me';
-    Log('[GetCurrentCashierInfo] GET ' + Url);
-
-    // Формуємо curl команду з усіма необхідними заголовками
-    Command := Format(
-      'curl -s -X GET ' +
-      '-H "Accept: application/json" ' +
-      '-H "Authorization: Bearer %s" ' +
-      '-H "X-Client-Name: %s" ' +
-      '-H "X-Client-Version: %s" ' +
-      '"%s"',
-      [FAuthInfo.Token, FClientName, FClientVersion, Url]
-    );
-
-    Log('Виконуємо curl команду для отримання інформації про касира');
-
-    // Виконуємо команду через допоміжну функцію
-    TempResponse := '';
-    if not ExecuteCurlCommand(Command, 'GetCurrentCashierInfo', 'GET /api/v1/cashiers/me', TempResponse) then
-    begin
-      Response := 'Помилка виконання curl команди';
-      Log('Помилка: Не вдалося виконати curl команду для отримання інформації касира');
-      Exit;
-    end;
-
-    Response := TempResponse;
-
-    // Перевіряємо наявність помилок у відповіді
-    if Response = '' then
-    begin
-      Log('Помилка: Порожня відповідь від сервера');
-      Response := 'Порожня відповідь від сервера';
-      Exit;
-    end;
-
-    // Аналізуємо відповідь на наявність помилок API
-    if Pos('"message"', Response) > 0 then
-    begin
-      if Pos('"Not Found"', Response) > 0 then
-      begin
-        Log('Помилка: Ендпоінт не знайдено (404). Можливо, некоректний URL або права доступу');
-        Response := 'Ендпоінт не знайдено. Перевірте URL та права доступу';
-        Exit;
-      end
-      else if Pos('"Unauthorized"', Response) > 0 then
-      begin
-        Log('Помилка: Неавторизований доступ (401). Токен може бути недійсним');
-        Response := 'Неавторизований доступ. Перевірте токен';
-        Exit;
-      end
-      else if Pos('"Forbidden"', Response) > 0 then
-      begin
-        Log('Помилка: Доступ заборонено (403). Недостатньо прав');
-        Response := 'Доступ заборонено. Недостатньо прав для отримання інформації касира';
-        Exit;
-      end
-      else if Pos('"Internal Server Error"', Response) > 0 then
-      begin
-        Log('Помилка: Внутрішня помилка сервера (500)');
-        Response := 'Внутрішня помилка сервера Checkbox API';
-        Exit;
-      end
-      else if Pos('"Bad Request"', Response) > 0 then
-      begin
-        Log('Помилка: Невірний запит (400)');
-        Response := 'Невірний запит до Checkbox API';
-        Exit;
-      end;
-    end;
-
-    // Перевіряємо успішність відповіді за наявністю ID касира
-    Result := (Pos('"id"', Response) > 0) or (Pos('"cashier_id"', Response) > 0);
-
-    if Result then
-    begin
-      Log('Інформацію про касира отримано успішно');
-
-      // Додаткова інформація для логування
-      if Pos('"name"', Response) > 0 then
-        Log('Знайдено ім''я касира у відповіді')
-      else if Pos('"full_name"', Response) > 0 then
-        Log('Знайдено повне ім''я касира у відповіді');
-
-      if Pos('"email"', Response) > 0 then
-        Log('Знайдено email касира у відповіді');
-
-      Log('Перші 200 символів відповіді: ' + Copy(Response, 1, 200) + '...');
-    end
-    else
-    begin
-      Log('Помилка: Відповідь не містить очікуваних даних касира');
-      Log('Повна відповідь: ' + Copy(Response, 1, 500));
-
-      // Додаткова інформація для відладки
-      if Pos('error', LowerCase(Response)) > 0 then
-        Log('Відповідь містить помилку API')
-      else if Pos('success', LowerCase(Response)) > 0 then
-        Log('Відповідь містить ознаки успіху, але не знайдено ID касира');
-    end;
-
-  except
-    on E: Exception do
-    begin
-      Response := 'Виняток при отриманні інформації касира: ' + E.Message;
-      Log('Критичний виняток в GetCurrentCashierInfo: ' + E.Message + ' | Клас: ' + E.ClassName);
-      Result := False;
-    end;
-  end; *)
-end;
 
 function TReceiptWebAPI.CreateCardPayment(AValue: Integer;
   AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
@@ -8242,210 +7985,7 @@ begin
   Result.RRN := ARRN;
 end;
 
-function TReceiptWebAPI.GetReportText(const AReportId: string; out ATextContent: string;
-  const AWidth: Integer = 0): Boolean;
-var
-  LCommand: string;
-  LOutputFile: string;
-  LSaveFile: string;
-  LFile: TStringList;
-  LOutput: string;
-  LExitCode: Integer;
-  LParams: string;
-  LLoginResponse: string;
-begin
-  Result := False;
-  ATextContent := '';
 
-  if not IsTokenValid then
-  begin
-    if not LoginCurl(FUsername, FPassword, LLoginResponse) then
-    begin
-      Log('Потрібен повторний вхід: ' + LLoginResponse);
-      Exit;
-    end;
-  end;
-
-  LOutputFile := IncludeTrailingPathDelimiter(FTempDirectory) + 'xreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
-  LSaveFile := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'xreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
-
-  // Формуємо параметри
-  LParams := '';
-  if AWidth > 0 then
-    LParams := 'width=' + IntToStr(AWidth);
-
-  // ВИПРАВЛЕННЯ: Використовуємо /text замість /txt
-  LCommand := 'curl -a -X GET ' +
-              '-H "accept: text/plain" ' +
-              '-H "X-Client-Name: ' + FClientName + '" ' +
-              '-H "X-Client-Version: ' + FClientVersion + '" ' +
-              '-H "Authorization: Bearer ' + FAuthInfo.Token + '" ' +
-              '"https://api.checkbox.ua/api/v1/reports/' + AReportId + '/text'; // ВИПРАВЛЕННЯ: /text
-
-  if LParams <> '' then
-    LCommand := LCommand + '?' + LParams;
-
-  LCommand := LCommand + '" ' +
-              '-o "' + LOutputFile + '"';
-
-  // Логуємо команду
-  Log('⚡ [GetReportText] GET /api/v1/reports/' + AReportId + '/text'); // ВИПРАВЛЕННЯ: /text
-  Log('Executing curl command: ' + LCommand);
-
-  try
-    // Виконуємо команду через bash
-    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
-
-    // Логуємо результат
-    Log('Curl exit status: ' + IntToStr(LExitCode));
-    Log('Raw output: ' + LOutput);
-
-    if LExitCode = 0 then
-    begin
-      // Читаємо отриманий текстовий файл
-      if FileExists(LOutputFile) then
-      begin
-        LFile := TStringList.Create;
-        try
-          LFile.LoadFromFile(LOutputFile);
-          ATextContent := LFile.Text;
-
-          Log('=== ДІАГНОСТИКА ФАЙЛУ TXT ===');
-          Log('Розмір файлу: ' + IntToStr(Length(ATextContent)) + ' байт');
-          Log('Перші 200 символів: ' + Copy(ATextContent, 1, 200));
-          Log('=== КІНЕЦЬ ДІАГНОСТИКИ ===');
-
-          // Перевіряємо, чи це JSON з помилкою
-          if (Pos('{"message":', ATextContent) > 0) or (Pos('"message"', ATextContent) > 0) then
-          begin
-            FLastError := 'API повернув JSON помилку: ' + ATextContent;
-            Log('✗ ' + FLastError);
-            Result := False;
-          end
-          else
-          begin
-            Result := True;
-
-            // Копіюємо файл до RECEIPTS для збереження
-            if CopyFile(LOutputFile, LSaveFile) then
-            begin
-              Log('✅ Текст звіту збережено: ' + ExtractFileName(LSaveFile));
-            end;
-
-            Log('✅ Текст звіту успішно отримано: ' + LOutputFile);
-          end;
-        finally
-          LFile.Free;
-        end;
-        DeleteFile(LOutputFile);
-      end
-      else
-      begin
-        FLastError := 'Файл текстового звіту не було створено';
-        Log('✗ ' + FLastError);
-      end;
-    end
-    else
-    begin
-      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
-      Log('✗ Помилка отримання текстового звіту: ' + FLastError);
-    end;
-  except
-    on E: Exception do
-    begin
-      FLastError := 'Помилка отримання текстового звіту: ' + E.Message;
-      Log('✗ ' + FLastError);
-    end;
-  end;
-end;
-
-
-function TReceiptWebAPI.GetReportPNG(const AReportId: string; out AFileName: string;
-  const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
-var
-  LCommand: string;
-  LParams: string;
-  LOutput: string;
-  LExitCode: Integer;
-  LLoginResponse: string; // Додано для логіну
-begin
-  Result := False;
-  AFileName := '';
-
-  if not IsTokenValid then
-  begin
-    if not LoginCurl(FUsername, FPassword, LLoginResponse) then // Використовуємо локальну змінну
-    begin
-      Log('Потрібен повторний вхід: ' + LLoginResponse);
-      Exit;
-    end;
-  end;
-
-  // Формуємо параметри
-  LParams := '';
-  if AWidth > 0 then
-    LParams := LParams + 'width=' + IntToStr(AWidth);
-  if APaperWidth > 0 then
-  begin
-    if LParams <> '' then LParams := LParams + '&';
-    LParams := LParams + 'paper_width=' + IntToStr(APaperWidth);
-  end;
-
-  // Створюємо унікальне ім'я файлу
-  AFileName := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'xreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.png';
-
-  // Формуємо повну curl команду для bash
-  LCommand := 'curl -a -X GET ' +
-              '-H "accept: image/png" ' +
-              '-H "X-Client-Name: ' + FClientName + '" ' +
-              '-H "X-Client-Version: ' + FClientVersion + '" ' +
-              '-H "Authorization: Bearer ' + FAuthInfo.Token + '" ' +
-              '"https://api.checkbox.ua/api/v1/reports/' + AReportId + '/png';
-
-  if LParams <> '' then
-    LCommand := LCommand + '?' + LParams;
-
-  LCommand := LCommand + '" ' +
-              '-o "' + AFileName + '"';
-
-  // Логуємо команду
-  Log('⚡ [GetReportPNG] GET /api/v1/reports/' + AReportId + '/png');
-  Log('Executing curl command: ' + LCommand);
-
-  try
-    // Виконуємо команду через bash
-    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
-
-    // Логуємо результат
-    Log('Curl exit status: ' + IntToStr(LExitCode));
-    Log('Raw output: ' + LOutput);
-
-    if LExitCode = 0 then
-    begin
-      Result := True;
-      Log('✅ PNG звіт успішно отримано: ' + AFileName);
-
-      if not FileExists(AFileName) then
-      begin
-        Result := False;
-        FLastError := 'Файл PNG звіту не було створено';
-        Log('✗ ' + FLastError);
-      end;
-    end
-    else
-    begin
-      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
-      Log('✗ Помилка отримання PNG звіту: ' + FLastError);
-    end;
-  except
-    on E: Exception do
-    begin
-      FLastError := 'Помилка отримання PNG звіту: ' + E.Message;
-      Log('✗ ' + FLastError);
-      Result := False;
-    end;
-  end;
-end;
 
 function TReceiptWebAPI.GetReceiptHTML(const AReceiptId: string; out AHTMLContent: string): Boolean;
 var
@@ -8690,18 +8230,6 @@ var
   LOutput: string;
   LExitCode: Integer;
 begin
-  (*Log('=== ДІАГНОСТИКА CURL ===');
-  Log('Користувач: ' + GetEnvironmentVariable('USER'));
-  Log('Поточна директорія: ' + GetCurrentDir);
-  Log('USER: ' + GetEnvironmentVariable('USER'));
-  Log('PWD: ' + GetCurrentDir);
-  Log('RECEIPTS: ' + ReceiptsDirectory);
-  Log('TMP: ' + TempDirectory);
-
-  // Тестовий запит для перевірки бінарних даних
-  Log('=== ТЕСТ БІНАРНИХ ДАНИХ ===');
-  RunCommand('/bin/bash', ['-c', 'curl -s -X ''GET'' ''https://api.checkbox.ua/api/v1/receipts/d2497ec1-6cc9-404c-a3b0-4a22e4061716/qrcode'' -H ''accept: image/png'' -o "/home/sony/MAG/TMP/test_qr.png" && echo "УСПІХ: $(stat -c%s /home/sony/MAG/TMP/test_qr.png) bytes" || echo "ПОМИЛКА: $?"'], LOutput);
-  Log('Результат тесту: ' + LOutput);  *)
 
   Result := False;
   AFileName := '';
@@ -8915,168 +8443,7 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.GetZReportText(const AReportId: string; out ATextContent: string): Boolean;
-var
-  LCommand: string;
-  LOutputFile: string;
-  LSaveFile: string;
-  LFile: TStringList;
-  LOutput: string;
-  LExitCode: Integer;
-begin
-  Result := False;
-  ATextContent := '';
 
-  LOutputFile := IncludeTrailingPathDelimiter(FTempDirectory) + 'zreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
-  LSaveFile := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'zreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
-
-  // Формуємо повну curl команду для bash
-  LCommand := 'curl -a -X ''GET'' ' +
-              '''https://api.checkbox.ua/api/v1/reports/' + AReportId + '/text'' ' +
-              '-H ''accept: text/plain'' ' +
-              '-H ''X-Client-Name: ' + FClientName + ''' ' +
-              '-H ''X-Client-Version: ' + FClientVersion + ''' ' +
-              '-o "' + LOutputFile + '"';
-
-  // Логуємо команду
-  Log('⚡ [GetZReportText] /reports/' + AReportId + '/text');
-  Log('Executing curl command: ' + LCommand);
-
-  try
-    // Виконуємо команду через bash
-    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
-
-    // Логуємо результат
-    Log('Curl exit status: ' + IntToStr(LExitCode));
-
-    if LExitCode = 0 then
-    begin
-      // Читаємо отриманий текстовий файл
-      if FileExists(LOutputFile) then
-      begin
-        LFile := TStringList.Create;
-        try
-          LFile.LoadFromFile(LOutputFile);
-          ATextContent := LFile.Text;
-          Result := True;
-
-          // Копіюємо файл до RECEIPTS для збереження
-          if CopyFile(LOutputFile, LSaveFile) then
-          begin
-            Log('✅ Текст Z-звіту збережено: ' + ExtractFileName(LSaveFile));
-          end;
-
-          Log('✅ Текст Z-звіту успішно отримано: ' + LOutputFile);
-        finally
-          LFile.Free;
-        end;
-        DeleteFile(LOutputFile); // Видаляємо тимчасовий файл
-      end
-      else
-      begin
-        FLastError := 'Текстовий файл Z-звіту не було створено';
-        Log('✗ ' + FLastError);
-      end;
-    end
-    else
-    begin
-      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
-      Log('✗ Помилка отримання тексту Z-звіту: ' + FLastError);
-    end;
-  except
-    on E: Exception do
-    begin
-      FLastError := 'Помилка отримання тексту Z-звіту: ' + E.Message;
-      Log('✗ ' + FLastError);
-    end;
-  end;
-end;
-
-function TReceiptWebAPI.GetZReportPNG(const AReportId: string; out AFileName: string;
-  const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
-var
-  LCommand: string;
-  LParams: string;
-  LOutput: string;
-  LExitCode: Integer;
-begin
-  Result := False;
-  AFileName := '';
-
-  if not IsTokenValid then
-  begin
-    if not LoginCurl(FUsername, FPassword, LOutput) then
-    begin
-      Log('Потрібен повторний вхід: ' + LOutput);
-      Exit;
-    end;
-  end;
-
-  // Формуємо параметри
-  LParams := '';
-  if AWidth > 0 then
-    LParams := LParams + 'width=' + IntToStr(AWidth);
-  if APaperWidth > 0 then
-  begin
-    if LParams <> '' then LParams := LParams + '&';
-    LParams := LParams + 'paper_width=' + IntToStr(APaperWidth);
-  end;
-
-  // Створюємо унікальне ім'я файлу
-  AFileName := IncludeTrailingPathDelimiter(FReceiptsDirectory) + 'zreport_' + AReportId + '_' + IntToStr(GetTickCount) + '.png';
-
-  // Формуємо повну curl команду для bash
-  LCommand := 'curl -a -X GET ' +
-              '-H "accept: image/png" ' +
-              '-H "X-Client-Name: ' + FClientName + '" ' +
-              '-H "X-Client-Version: ' + FClientVersion + '" ' +
-              '-H "Authorization: Bearer ' + FAuthInfo.Token + '" ' +
-              '"https://api.checkbox.ua/api/v1/reports/' + AReportId + '/png';
-
-  if LParams <> '' then
-    LCommand := LCommand + '?' + LParams;
-
-  LCommand := LCommand + '" ' +
-              '-o "' + AFileName + '"';
-
-  // Логуємо команду
-  Log('⚡ [GetZReportPNG] GET /api/v1/reports/' + AReportId + '/png');
-  Log('Executing curl command: ' + LCommand);
-
-  try
-    // Виконуємо команду через bash
-    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
-
-    // Логуємо результат
-    Log('Curl exit status: ' + IntToStr(LExitCode));
-    Log('Raw output: ' + LOutput);
-
-    if LExitCode = 0 then
-    begin
-      Result := True;
-      Log('✅ PNG Z-звіт успішно отримано: ' + AFileName);
-
-      if not FileExists(AFileName) then
-      begin
-        Result := False;
-        FLastError := 'Файл PNG Z-звіту не було створено';
-        Log('✗ ' + FLastError);
-      end;
-    end
-    else
-    begin
-      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
-      Log('✗ Помилка отримання PNG Z-звіту: ' + FLastError);
-    end;
-  except
-    on E: Exception do
-    begin
-      FLastError := 'Помилка отримання PNG Z-звіту: ' + E.Message;
-      Log('✗ ' + FLastError);
-      Result := False;
-    end;
-  end;
-end;
 
 function TReceiptWebAPI.ExtractZReportIdFromCloseResponse(const AResponse: string): string;
 var
@@ -9112,6 +8479,262 @@ begin
   end;
 end;
 
+
+function TReceiptWebAPI.GetSummaryReportText(const AReportId: string; out ATextContent: string;
+  const AReportType: TReportType; const AWidth: Integer = 0): Boolean;
+var
+  LCommand: string;
+  LOutputFile: string;
+  LSaveFile: string;
+  LFile: TStringList;
+  LOutput: string;
+  LExitCode: Integer;
+  LParams: string;
+  LLoginResponse: string;
+  LReportTypeStr: string;
+begin
+  Result := False;
+  ATextContent := '';
+
+  // Визначаємо тип звіту
+  case AReportType of
+    rtXReport: LReportTypeStr := 'xreport';
+    rtZReport: LReportTypeStr := 'zreport';
+  else
+    LReportTypeStr := 'report';
+  end;
+
+  // Перевірка авторизації (тільки для X-звітів)
+  if (AReportType = rtXReport) and not IsTokenValid then
+  begin
+    if not LoginCurl(FUsername, FPassword, LLoginResponse) then
+    begin
+      Log('Потрібен повторний вхід: ' + LLoginResponse);
+      Exit;
+    end;
+  end;
+
+  // Формуємо імена файлів
+  LOutputFile := IncludeTrailingPathDelimiter(FTempDirectory) +
+                 LReportTypeStr + '_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
+  LSaveFile := IncludeTrailingPathDelimiter(FReceiptsDirectory) +
+               LReportTypeStr + '_' + AReportId + '_' + IntToStr(GetTickCount) + '.txt';
+
+  // Формуємо параметри
+  LParams := '';
+  if AWidth > 0 then
+    LParams := 'width=' + IntToStr(AWidth);
+
+  // Базова команда curl
+  LCommand := 'curl -a -X GET ' +
+              '-H "accept: text/plain" ' +
+              '-H "X-Client-Name: ' + FClientName + '" ' +
+              '-H "X-Client-Version: ' + FClientVersion + '"';
+
+  // Додаємо авторизацію (тільки для X-звітів)
+  if AReportType = rtXReport then
+    LCommand := LCommand + ' -H "Authorization: Bearer ' + FAuthInfo.Token + '"';
+
+  // Додаємо URL
+  LCommand := LCommand + ' "https://api.checkbox.ua/api/v1/reports/' + AReportId + '/text';
+
+  // Додаємо параметри (якщо є)
+  if LParams <> '' then
+    LCommand := LCommand + '?' + LParams;
+
+  LCommand := LCommand + '" -o "' + LOutputFile + '"';
+
+  // Логуємо команду
+  Log('⚡ [GetReportText] ' + LReportTypeStr + ' GET /api/v1/reports/' + AReportId + '/text');
+  Log('Executing curl command: ' + LCommand);
+
+  try
+    // Виконуємо команду через bash
+    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
+
+    // Логуємо результат
+    Log('Curl exit status: ' + IntToStr(LExitCode));
+    if AReportType = rtXReport then
+      Log('Raw output: ' + LOutput);
+
+    if LExitCode = 0 then
+    begin
+      // Читаємо отриманий текстовий файл
+      if FileExists(LOutputFile) then
+      begin
+        LFile := TStringList.Create;
+        try
+          LFile.LoadFromFile(LOutputFile);
+          ATextContent := LFile.Text;
+
+          // Діагностика (тільки для X-звітів)
+          if AReportType = rtXReport then
+          begin
+            Log('=== ДІАГНОСТИКА ФАЙЛУ TXT ===');
+            Log('Розмір файлу: ' + IntToStr(Length(ATextContent)) + ' байт');
+            Log('Перші 200 символів: ' + Copy(ATextContent, 1, 200));
+            Log('=== КІНЕЦЬ ДІАГНОСТИКИ ===');
+          end;
+
+          // Перевіряємо на JSON-помилки (тільки для X-звітів)
+          if (AReportType = rtXReport) and
+             ((Pos('{"message":', ATextContent) > 0) or (Pos('"message"', ATextContent) > 0)) then
+          begin
+            FLastError := 'API повернув JSON помилку: ' + ATextContent;
+            Log('✗ ' + FLastError);
+            Result := False;
+          end
+          else
+          begin
+            Result := True;
+
+            // Копіюємо файл для збереження
+            if CopyFile(LOutputFile, LSaveFile) then
+            begin
+              Log('✅ Текст ' + LReportTypeStr + ' збережено: ' + ExtractFileName(LSaveFile));
+            end;
+
+            Log('✅ Текст ' + LReportTypeStr + ' успішно отримано: ' + LOutputFile);
+          end;
+        finally
+          LFile.Free;
+        end;
+        DeleteFile(LOutputFile);
+      end
+      else
+      begin
+        FLastError := 'Файл текстового ' + LReportTypeStr + ' не було створено';
+        Log('✗ ' + FLastError);
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
+      Log('✗ Помилка отримання тексту ' + LReportTypeStr + ': ' + FLastError);
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання тексту ' + LReportTypeStr + ': ' + E.Message;
+      Log('✗ ' + FLastError);
+    end;
+  end;
+end;
+
+function TReceiptWebAPI.GetSummaryReportPNG(const AReportId: string; out AFileName: string;
+  const AReportType: TReportType; const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
+var
+  LOutput: string;
+  LExitCode: Integer;
+  LLoginResponse,  LCommand, LLogPrefix: string;
+
+  function BuildQueryParams: string;
+  begin
+    Result := '';
+    if AWidth > 0 then
+      Result := Result + 'width=' + IntToStr(AWidth);
+    if APaperWidth > 0 then
+    begin
+      if Result <> '' then Result := Result + '&';
+      Result := Result + 'paper_width=' + IntToStr(APaperWidth);
+    end;
+  end;
+
+  function BuildCurlCommand(const AParams: string): string;
+  begin
+    Result := 'curl -a -X GET ' +
+              '-H "accept: image/png" ' +
+              '-H "X-Client-Name: ' + FClientName + '" ' +
+              '-H "X-Client-Version: ' + FClientVersion + '" ' +
+              '-H "Authorization: Bearer ' + FAuthInfo.Token + '" ' +
+              '"https://api.checkbox.ua/api/v1/reports/' + AReportId + '/png';
+
+    if AParams <> '' then
+      Result := Result + '?' + AParams;
+
+    Result := Result + '" ' +
+              '-o "' + AFileName + '"';
+  end;
+
+  function GetFilePrefix: string;
+  begin
+    case AReportType of
+      rtZReport: Result := 'zreport_';
+      rtXReport: Result := 'xreport_';
+    else
+      Result := 'report_';
+    end;
+  end;
+
+  function GetLogPrefix: string;
+  begin
+    case AReportType of
+      rtZReport: Result := 'Z-звіт';
+      rtXReport: Result := 'X-звіт';
+    else
+      Result := 'звіт';
+    end;
+  end;
+
+begin
+  Result := False;
+  AFileName := '';
+
+  if not IsTokenValid then
+  begin
+    if not LoginCurl(FUsername, FPassword, LLoginResponse) then
+    begin
+      Log('Потрібен повторний вхід: ' + LLoginResponse);
+      Exit;
+    end;
+  end;
+
+  // Створюємо унікальне ім'я файлу
+  AFileName := IncludeTrailingPathDelimiter(FReceiptsDirectory) +
+               GetFilePrefix + AReportId + '_' + IntToStr(GetTickCount) + '.png';
+
+  // Формуємо curl команду
+  LCommand := BuildCurlCommand(BuildQueryParams);
+
+  // Логуємо команду
+  LLogPrefix := GetLogPrefix;
+  Log('⚡ [GetReportPNG] GET /api/v1/reports/' + AReportId + '/png (' + LLogPrefix + ')');
+  Log('Executing curl command: ' + LCommand);
+
+  try
+    // Виконуємо команду через bash
+    LExitCode := ExecuteCommand('/bin/bash', ['-c', LCommand], LOutput);
+
+    // Логуємо результат
+    Log('Curl exit status: ' + IntToStr(LExitCode));
+    Log('Raw output: ' + LOutput);
+
+    if LExitCode = 0 then
+    begin
+      Result := True;
+      Log('✅ PNG ' + LLogPrefix + ' успішно отримано: ' + AFileName);
+
+      if not FileExists(AFileName) then
+      begin
+        Result := False;
+        FLastError := 'Файл PNG ' + LLogPrefix + ' не було створено';
+        Log('✗ ' + FLastError);
+      end;
+    end
+    else
+    begin
+      FLastError := 'Помилка виконання curl: код ' + IntToStr(LExitCode);
+      Log('✗ Помилка отримання PNG ' + LLogPrefix + ': ' + FLastError);
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := 'Помилка отримання PNG ' + LLogPrefix + ': ' + E.Message;
+      Log('✗ ' + FLastError);
+      Result := False;
+    end;
+  end;
+end;
 
 
 
