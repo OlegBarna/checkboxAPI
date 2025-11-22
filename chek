@@ -10,7 +10,8 @@ uses
   LR_Class, LR_DBSet, LR_BarC, DKlient, DRek, dgssch,  dsch, splash,
   dsopl, dvras, sprop, kredit, printers, Menus, EditBtn, dklgrupa,dndata,
   dklnt, dgtov, LCLType, ComCtrls, Spin, ReceiptWebAPI, DateUtils,
-  fpjson, jsonparser, jsonscanner,StrUtils, DB,  FiscalCheckViewer, uchekdb;
+  fpjson, jsonparser, jsonscanner,StrUtils, DB,  FiscalCheckViewer, uchekdb,
+  uFpsExport,LCLIntf;
 
 type
   TStatusType = (stAPI, stCashier, stCashRegister, stShift);
@@ -19,48 +20,64 @@ type
   { TFmChek }
 
   TFmChek = class(TForm)
+    // === КОМПОНЕНТИ ФОРМИ ===
+    // Основні елементи керування
     btbtnSendReceiptCurl: TBitBtn;
-    BitBtn10: TBitBtn;
-    BitBtn11: TBitBtn;
-    BitBtn12: TBitBtn;
-    btnCheckConnectivity: TButton;
-    btnCloseShiftSimpleCurl: TButton;
-    btnCloseShiftWithReportCurl: TButton;
     btnCreateCheck: TBitBtn;
     btnCheckErase: TBitBtn;
-    BitBtn15: TBitBtn;
-    BitBtn16: TBitBtn;
     btnCheckPrint: TBitBtn;
     btnCheckCancel: TBitBtn;
     btnCreateNonFiscalCheck: TBitBtn;
-    btnGoOnline: TButton;
-    btnForsedShiftClose: TButton;
-    btnGetCashRegisterStatusCurl: TButton;
-    btnFindCashRegister: TButton;
-    btnGetFiscalMemoryStatus: TButton;
-    btnGetPrinterStatus: TButton;
-    btnGetShiftStatusCurl: TButton;
-    btnGoOffline: TButton;
+    btnWarranty: TBitBtn;
+    btnWarrantyExport: TBitBtn;
+
+    // Кнопки роботи з товарами
+    BitBtn10: TBitBtn;      // Додати товар
+    BitBtn11: TBitBtn;      // Видалити товар
+    BitBtn12: TBitBtn;      // Оновити товар
+    BitBtn15: TBitBtn;      // Вибрати серійник
+    BitBtn16: TBitBtn;      // Зберегти позицію
+
+    // Checkbox API - підключення та автентифікація
+    btnCheckConnectivity: TButton;
     btnLoginCurl: TButton;
     btnLogoutCurl: TButton;
-    btnOpenShiftCurl: TButton;
-    btnOpenShift: TButton;
-    btnProcessOfflineReceipts: TButton;
-    btnWarranty: TBitBtn;
-    btnRecoverShift: TButton;
-    btnInitializeCashRegister: TButton;
-    btnSaveSettings: TButton;
-    btnCashIn: TButton;
-    btnCashOut: TButton;
     btnPinCodeLogin: TButton;
+    btnSaveSettings: TButton;
+
+    // Checkbox API - робота з касою
+    btnInitializeCashRegister: TButton;
+    btnFindCashRegister: TButton;
     btnRefreshCashRegisters: TButton;
     btnSelectCashRegister: TButton;
+    btnGetCashRegisterStatusCurl: TButton;
+    btnGetPrinterStatus: TButton;
+    btnGetFiscalMemoryStatus: TButton;
+    btnGoOnline: TButton;
+    btnGoOffline: TButton;
+
+    // Checkbox API - робота зі зміною
+    btnOpenShift: TButton;
+    btnOpenShiftCurl: TButton;
+    btnGetShiftStatusCurl: TButton;
+    btnCloseShiftSimpleCurl: TButton;
+    btnCloseShiftWithReportCurl: TButton;
+    btnForsedShiftClose: TButton;
+    btnRecoverShift: TButton;
     btnGetXReport: TButton;
+
+    // Checkbox API - готівкові операції
+    btnCashIn: TButton;
+    btnCashOut: TButton;
+    btnProcessOfflineReceipts: TButton;
+
+    // Елементи вибору та налаштувань
     chkPreferTestCashRegister: TCheckBox;
     chkUseCheckboxAPI: TCheckBox;
-    chkSkipClientNameCheck: TCheckBox;
     cmbCashRegisters: TComboBox;
     DBComboPaymentType: TDBComboBox;
+
+    // Бази даних та навігація
     DBGrid1: TDBGrid;
     DBGrid3: TDBGrid;
     DBGrid4: TDBGrid;
@@ -68,21 +85,26 @@ type
     DBNavigator5: TDBNavigator;
     DBNavigator6: TDBNavigator;
     DBText1: TDBText;
+
+    // Поля вводу даних
     edtPinCode: TEdit;
     edtBaseURL: TEdit;
     edtCashRegisterId: TEdit;
     edtClientName: TEdit;
     edtClientVersion: TEdit;
     edtFiscalCode: TEdit;
-    edtFiscalDate: TEdit;
     edtLicenseKey: TEdit;
     edtPassword: TEdit;
     edtShiftId: TEdit;
     edtUsername: TEdit;
     fseAmount: TFloatSpinEdit;
+
+    // Звітність та друк
     frBarCodeObject1: TfrBarCodeObject;
     frDBDataSet1: TfrDBDataSet;
     frReport1: TfrReport;
+
+    // Групи та панелі
     GroupBox1: TGroupBox;
     gbLoginType: TGroupBox;
     GroupBox2: TGroupBox;
@@ -91,9 +113,19 @@ type
     grpAuthentication: TGroupBox;
     grpCashRegister: TGroupBox;
     grpConnection: TGroupBox;
-    grpOptions: TGroupBox;
     grpShiftOperations: TGroupBox;
+
+    // Радіокнопки авторизації
+    rbPinCode: TRadioButton;
+    rbPassword: TRadioButton;
+
+    // Інші компоненти
     IniPropStorage1: TIniPropStorage;
+    StatusBar1: TStatusBar;
+    memLog: TMemo;
+    PageControl1: TPageControl;
+
+    // Мітки
     Label1: TLabel;
     Label16: TLabel;
     Label2: TLabel;
@@ -109,13 +141,12 @@ type
     lblClientName: TLabel;
     lblClientVersion: TLabel;
     lblFiscalCode: TLabel;
-    lblFiscalDate: TLabel;
     lblLicenseKey: TLabel;
     lblPassword: TLabel;
     lblShiftId: TLabel;
     lblUsername: TLabel;
-    memLog: TMemo;
-    PageControl1: TPageControl;
+
+    // Панелі
     Panel1: TPanel;
     Panel10: TPanel;
     Panel11: TPanel;
@@ -131,182 +162,238 @@ type
     Panel7: TPanel;
     Panel8: TPanel;
     Panel9: TPanel;
-    rbPinCode: TRadioButton;
-    rbPassword: TRadioButton;
-    StatusBar1: TStatusBar;
+
+    // Вкладки
     tsCash: TTabSheet;
     tsConnection: TTabSheet;
     tsLog: TTabSheet;
     tsOperations: TTabSheet;
 
-    procedure BitBtn10Click(Sender: TObject);
-    procedure BitBtn11Click(Sender: TObject);
-    procedure BitBtn12Click(Sender: TObject);
-    procedure btbtnSendReceiptCurlClick(Sender: TObject);
-    procedure btnCashInClick(Sender: TObject);
-    procedure btnCashOutClick(Sender: TObject);
-    procedure btnCloseShiftSimpleCurlClick(Sender: TObject);
-    procedure btnCloseShiftWithReportCurlClick(Sender: TObject);
-    procedure btnCreateCheckClick(Sender: TObject);
-    procedure btnCheckEraseClick(Sender: TObject);
-    procedure BitBtn15Click(Sender: TObject);
-    procedure BitBtn16Click(Sender: TObject);
-    procedure btnCheckPrintClick(Sender: TObject);
-    procedure btnCheckCancelClick(Sender: TObject);
-    procedure btnCreateNonFiscalCheckClick(Sender: TObject);
-    procedure btnFindCashRegisterClick(Sender: TObject);
-    procedure btnForsedShiftCloseClick(Sender: TObject);
-    procedure btnGetCashRegisterStatusCurlClick(Sender: TObject);
-    procedure btnGetShiftStatusCurlClick(Sender: TObject);
-    procedure btnGetXReportClick(Sender: TObject);
-    procedure btnGoOfflineClick(Sender: TObject);
-    procedure btnGoOnlineClick(Sender: TObject);
-    procedure btnInitializeCashRegisterClick(Sender: TObject);
-    procedure btnLoginCurlClick(Sender: TObject);
-    procedure btnLogoutCurlClick(Sender: TObject);
-    procedure btnOpenShiftClick(Sender: TObject);
-    procedure btnOpenShiftCurlClick(Sender: TObject);
-    procedure btnPinCodeLoginClick(Sender: TObject);
-    procedure btnRecoverShiftClick(Sender: TObject);
-    procedure btnRefreshCashRegistersClick(Sender: TObject);
-    procedure btnSaveSettingsClick(Sender: TObject);
-    procedure btnSendReceiptClick(Sender: TObject);
-    procedure btnWarrantyClick(Sender: TObject);
-    procedure chkPreferTestCashRegisterClick(Sender: TObject);
-    procedure chkUseCheckboxAPIClick(Sender: TObject);
-    procedure cmbCashRegistersChange(Sender: TObject);
-    procedure DBComboPaymentTypeChange(Sender: TObject);
-    procedure DBGrid1DrawColumnCell(Sender: TObject; const Rect: TRect;
-      DataCol: Integer; Column: TColumn; State: TGridDrawState);
-    procedure DBGrid3DrawColumnCell(Sender: TObject; const Rect: TRect;
-      DataCol: Integer; Column: TColumn; State: TGridDrawState);
-    procedure DBGrid4DrawColumnCell(Sender: TObject; const Rect: TRect;
-      DataCol: Integer; Column: TColumn; State: TGridDrawState);
-    procedure FormClose(Sender: TObject; var CloseAction: TCloseAction);
-    procedure FormCreate(Sender: TObject);
-    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
-    procedure FormShow(Sender: TObject);
-    procedure frReport1GetValue(const ParName: String; var ParValue: Variant);
+    // === ОБРОБНИКИ ПОДІЙ ===
 
-    procedure btnCheckConnectivityClick(Sender: TObject);
-    procedure btnGetPrinterStatusClick(Sender: TObject);
-    procedure btnGetFiscalMemoryStatusClick(Sender: TObject);
-    procedure btnProcessOfflineReceiptsClick(Sender: TObject);
+    // Події життєвого циклу форми
+    procedure FormCreate(Sender: TObject);                    // Створення форми
+    procedure FormShow(Sender: TObject);                      // Показ форми
+    procedure FormClose(Sender: TObject; var CloseAction: TCloseAction); // Закриття форми
+    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState); // Натискання клавіш
 
-    procedure edtFiscalCodeChange(Sender: TObject);
-    procedure edtCashRegisterIdChange(Sender: TObject);
-    procedure PageControl1Change(Sender: TObject);
-    procedure rbPasswordClick(Sender: TObject);
-    procedure rbPinCodeClick(Sender: TObject);
-    procedure tsCashShow(Sender: TObject);
+    // Події відображення даних
+    procedure DBGrid1DrawColumnCell(Sender: TObject; const Rect: TRect; // Малювання комірок чеків
+      DataCol: Integer; Column: TColumn; State: TGridDrawState);
+    procedure DBGrid3DrawColumnCell(Sender: TObject; const Rect: TRect; // Малювання комірок товарів
+      DataCol: Integer; Column: TColumn; State: TGridDrawState);
+    procedure DBGrid4DrawColumnCell(Sender: TObject; const Rect: TRect; // Малювання комірок серійників
+      DataCol: Integer; Column: TColumn; State: TGridDrawState);
+    procedure frReport1GetValue(const ParName: String; var ParValue: Variant); // Генерація звітів
+
+    // Події зміни стану інтерфейсу
+    procedure PageControl1Change(Sender: TObject);            // Зміна вкладки
+    procedure tsCashShow(Sender: TObject);                    // Показ вкладки готівки
+    procedure cmbCashRegistersChange(Sender: TObject);        // Зміна вибраної каси
+    procedure DBComboPaymentTypeChange(Sender: TObject);      // Зміна типу оплати
+
+    // Події налаштувань
+    procedure chkUseCheckboxAPIClick(Sender: TObject);        // Перемикач Checkbox API
+    procedure chkPreferTestCashRegisterClick(Sender: TObject); // Пріоритет тестової каси
+    procedure edtFiscalCodeChange(Sender: TObject);           // Зміна фіскального коду
+    procedure edtCashRegisterIdChange(Sender: TObject);       // Зміна ID каси
+
+    // Події автентифікації
+    procedure rbPasswordClick(Sender: TObject);               // Вибрано парольну авторизацію
+    procedure rbPinCodeClick(Sender: TObject);                // Вибрано PIN-авторизацію
+
+    // Операції з чеками
+    procedure btnCreateCheckClick(Sender: TObject);           // Створити новий чек
+    procedure btnCreateNonFiscalCheckClick(Sender: TObject);  // Створити службовий чек
+    procedure btnCheckEraseClick(Sender: TObject);            // Видалити чек
+    procedure btnCheckCancelClick(Sender: TObject);           // Скасувати чек
+    procedure btnCheckPrintClick(Sender: TObject);            // Надрукувати чек
+
+    // Операції з товарами
+    procedure BitBtn10Click(Sender: TObject);                 // Додати товар до чека
+    procedure BitBtn11Click(Sender: TObject);                 // Видалити товар з чека
+    procedure BitBtn12Click(Sender: TObject);                 // Оновити товар в чеку
+    procedure BitBtn15Click(Sender: TObject);                 // Вибрати серійний номер
+    procedure BitBtn16Click(Sender: TObject);                 // Зберегти позицію
+
+    // Гарантійні операції
+    procedure btnWarrantyClick(Sender: TObject);              // Перегляд гарантії
+    procedure btnWarrantyExportClick(Sender: TObject);        // Експорт гарантії
+
+    // Checkbox API - підключення та налаштування
+    procedure btnCheckConnectivityClick(Sender: TObject);     // Перевірка з'єднання
+    procedure btnSaveSettingsClick(Sender: TObject);          // Зберегти налаштування
+    procedure btnLoginCurlClick(Sender: TObject);             // Увійти за паролем
+    procedure btnPinCodeLoginClick(Sender: TObject);          // Увійти за PIN-кодом
+    procedure btnLogoutCurlClick(Sender: TObject);            // Вийти з системи
+
+    // Checkbox API - робота з касою
+    procedure btnInitializeCashRegisterClick(Sender: TObject); // Ініціалізація каси
+    procedure btnFindCashRegisterClick(Sender: TObject);      // Пошук каси за фіскальним номером
+    procedure btnRefreshCashRegistersClick(Sender: TObject);  // Оновити список кас
+    procedure btnGetCashRegisterStatusCurlClick(Sender: TObject); // Статус каси
+    procedure btnGetPrinterStatusClick(Sender: TObject);      // Статус принтера
+    procedure btnGetFiscalMemoryStatusClick(Sender: TObject); // Статус фіскальної пам'яті
+    procedure btnGoOnlineClick(Sender: TObject);              // Перейти в онлайн
+    procedure btnGoOfflineClick(Sender: TObject);             // Перейти в офлайн
+
+    // Checkbox API - робота зі зміною
+    procedure btnOpenShiftClick(Sender: TObject);             // Відкрити зміну (автоматично)
+    procedure btnOpenShiftCurlClick(Sender: TObject);         // Відкрити зміну (вручну)
+    procedure btnGetShiftStatusCurlClick(Sender: TObject);    // Статус зміни
+    procedure btnCloseShiftSimpleCurlClick(Sender: TObject);  // Закрити зміну просто
+    procedure btnCloseShiftWithReportCurlClick(Sender: TObject); // Закрити зміну зі звітом
+    procedure btnForsedShiftCloseClick(Sender: TObject);      // Примусове закриття зміни
+    procedure btnRecoverShiftClick(Sender: TObject);          // Відновити зміну
+    procedure btnGetXReportClick(Sender: TObject);            // Отримати X-звіт
+
+    // Checkbox API - готівкові операції
+    procedure btnCashInClick(Sender: TObject);                // Внесення готівки
+    procedure btnCashOutClick(Sender: TObject);               // Винесення готівки
+    procedure btnProcessOfflineReceiptsClick(Sender: TObject); // Обробка офлайн-чеків
+
+    // Checkbox API - фіскалізація
+    procedure btbtnSendReceiptCurlClick(Sender: TObject);     // Відправка фіскального чека
+
   private
-    FDBManager: TChekDBManager;
+    // === ПОЛЯ КЛАСУ ===
 
-    datavv,nomer,psvid,nalkod,pnazva,pnazshort:string;
-    reppath:string;
-    logpath:string;
-    receiptspath:String;
-    temppath:string;
-    level,createlogs:boolean;
-    FCurrentBalance: Integer;
-    FLastBalanceUpdate: TDateTime;
-    FReceiptAPI: TReceiptWebAPI; // Екземпляр нашого API класу
-    UseCheckboxAPI: Boolean; // Нова глобальна змінна
-    FUpdatingCheckboxState: Boolean;
-    PinLogin: Boolean;
-    FPreferTestCashRegister: Boolean;
-    FCashRegisters: TCashRegisterArray;
+    // Менеджери та API
+    FDBManager: TChekDBManager;                               // Менеджер роботи з БД
+    FReceiptAPI: TReceiptWebAPI;                              // API для роботи з Checkbox
 
-    FSessionCounter: Integer;        // Лічильник сесій
-    FCurrentLogFileName: string;     // Поточний файл логу
+    // Шляхи до файлів
+    datavv, nomer, psvid, nalkod, pnazva, pnazshort: string;  // Дані для звітів
+    reppath: string;                                          // Шлях до звітів
+    logpath: string;                                          // Шлях до логів
+    receiptspath: String;                                     // Шлях до чеків
+    temppath: string;                                         // Тимчасовий шлях
 
-    FIsProcessingFiscalization: Boolean; // Захист від рекурсії
-    FCashierNameFromIni: string;
-    FDepartamentFromIni: string;
-    GoodsTaxGroup: integer; // з конфіг файлу група податків для товарів
-    FUpdatingPaymentType: Boolean;
+    // Налаштування та прапорці
+    level, createlogs: boolean;                               // Рівень безпеки та логування
+    UseCheckboxAPI: Boolean;                                  // Використання Checkbox API
+    PinLogin: Boolean;                                        // Авторизація за PIN-кодом
+    FPreferTestCashRegister: Boolean;                         // Пріоритет тестової каси
+    GoodsTaxGroup: integer;                                   // Податкова група товарів
 
-    function DBManagerReady: Boolean;
+    // Інформація про касира
+    FCashierNameFromIni: string;                              // Ім'я касира з конфігурації
+    FDepartamentFromIni: string;                              // Відділ з конфігурації
 
+    // Стан готівки
+    FCurrentBalance: Integer;                                 // Поточний баланс каси
+    FLastBalanceUpdate: TDateTime;                            // Час останнього оновлення балансу
 
-    procedure InitializeLogFile;     // Новий метод для ініціалізації логу
-    procedure WriteLogToFile(const AMessage: string); // Метод запису в файл
+    // Список кас
+    FCashRegisters: TCashRegisterArray;                       // Масив доступних кас
 
-    procedure Log(const AMessage: string); // Допоміжний метод для логування
-    procedure ParseAndShowZReport(const AZReportJSON: string);
-    procedure ClearShiftStateFile;
-    procedure SynchronizeShiftId(const AShiftId: string);
-    function ValidateShiftId(const AShiftId: string): Boolean;
-    procedure ClearShiftState;
-    procedure SaveSettings;
-    procedure SaveCashRegisterId(const ACashRegisterId: string);
-    procedure SaveFiscalCode(const AFiscalCode: string);
-    function GetAmountInKopiyky: Integer;
-    procedure UpdateCashBalance;
-    procedure UpdateBalanceAfterOperation;
-    function CalculateLocalBalance: Integer;
-    procedure ChangeCheckboxAPIFunctionality(Functionality: Boolean);
-    function IsShiftOpen: Boolean;
-    function CheckAndRenewAuth: Boolean;
-    function ValidateAPIState(RequireShift: Boolean = False;RequireCashRegister: Boolean = False;
-                              RequireCashRegisterList: Boolean = False): Boolean;
-    function ValidateCheckForFiscalization: Boolean;
-    function InitializeOptimalCashRegister(var Response: string): Boolean;
-    procedure LoadCashRegisterPreferences;
-    procedure SaveCashRegisterPreferences;
-    procedure RefreshCashRegisterList;
-    function RetryFiscalization(Receipt: TReceipt; MaxRetries: Integer): Boolean;
-    procedure ProcessPendingFiscalizations;
-    function ValidateReceiptData: Boolean;
+    // Логування
+    FSessionCounter: Integer;                                 // Лічильник сесій
+    FCurrentLogFileName: string;                              // Поточний файл логу
 
-    procedure MarkCheckAsPrinted(CheckID: Integer);
-    procedure UpdateFiscalStatus(CheckID: Integer; Status: string;FiscalData: string = ''; ErrorText: string = '');
-    procedure ConvertToFiscalCheck(CheckID: Integer);
-    procedure ConvertToNonFiscalCheck(CheckID: Integer);
+    // Прапорці стану
+    FIsProcessingFiscalization: Boolean;                      // Захист від рекурсії фіскалізації
+    FUpdatingCheckboxState: Boolean;                          // Оновлення стану Checkbox
+    FUpdatingPaymentType: Boolean;                            // Оновлення типу оплати
 
-    procedure FillMandatoryReceiptFields(Receipt: TReceipt; CheckID: Integer);
-    procedure FillGoodsFromDatabase(Receipt: TReceipt; CheckID: Integer);
-    procedure FillPaymentsFromDatabase(Receipt: TReceipt; CheckID: Integer);
-    function CreateTaxByGroup(TaxGroup: Integer): TTax;
-    function ValidateReceiptStructure(Receipt: TReceipt): Boolean;
-    function ValidateGoods(Goods: array of TGoodItem): Boolean;
-    function CalculateTotalSum(Goods: array of TGoodItem): Integer;
-    function ExceptionToString(E: Exception): string;
-    function DetermineTaxGroupForProduct(ProductCode: string): Integer;
-    function ReceiptStatusToString(Status: TReceiptStatus): string;
+    // === ПРИВАТНІ МЕТОДИ ===
 
+    // Група: Перевірки та валідації
+    function DBManagerReady: Boolean;                         // Перевірка готовності менеджера БД
+    function ValidateAPIState(RequireShift: Boolean = False;  // Перевірка стану API
+      RequireCashRegister: Boolean = False;
+      RequireCashRegisterList: Boolean = False): Boolean;
+    function ValidateCheckForFiscalization: Boolean;          // Перевірка чека для фіскалізації
+    function ValidateReceiptData: Boolean;                    // Перевірка даних чека
+    function ValidateShiftId(const AShiftId: string): Boolean; // Валідація ID зміни
+    function CheckAndRenewAuth: Boolean;                      // Перевірка та оновлення авторизації
+    function IsShiftOpen: Boolean;                            // Перевірка відкритості зміни
+    function IsShiftReadyForFiscalization: Boolean;           // Перевірка готовності зміни до фіскалізації
+    function IsCashRegisterOnline: Boolean;                   // Перевірка онлайн-статусу каси
+    function IsNetworkError(const AResponse: string): Boolean; // Перевірка мережевої помилки
+    function ShouldRetryFiscalization(ACheckID: Integer;      // Визначення необхідності повторної спроби
+      const AResponse: string; CurrentRetry: Integer): Boolean;
 
-    procedure HandleSuccessfulFiscalization(ACheckID: Integer;
+    // Група: Робота з готівкою та сумами
+    function GetAmountInKopiyky: Integer;                     // Конвертація суми в копійки
+    procedure UpdateCashBalance;                              // Оновлення відображення балансу
+    procedure UpdateBalanceAfterOperation;                    // Оновлення балансу після операції
+    function CalculateLocalBalance: Integer;                  // Розрахунок локального балансу
+
+    // Група: Логування
+    procedure InitializeLogFile;                              // Ініціалізація файлу логу
+    procedure WriteLogToFile(const AMessage: string);         // Запис повідомлення в файл
+    procedure Log(const AMessage: string);                    // Логування з форматуванням
+
+    // Група: Робота зі зміною
+    procedure SynchronizeShiftId(const AShiftId: string);     // Синхронізація ID зміни
+    procedure ClearShiftState;                                // Очищення стану зміни
+    procedure ClearShiftStateFile;                            // Очищення файлу стану зміни
+
+    // Група: Налаштування та конфігурація
+    procedure SaveSettings;                                   // Збереження налаштувань
+    procedure SaveCashRegisterId(const ACashRegisterId: string); // Збереження ID каси
+    procedure SaveFiscalCode(const AFiscalCode: string);      // Збереження фіскального коду
+    procedure LoadCashRegisterPreferences;                    // Завантаження налаштувань каси
+    procedure SaveCashRegisterPreferences;                    // Збереження налаштувань каси
+    procedure ChangeCheckboxAPIFunctionality(Functionality: Boolean); // Зміна функціоналу Checkbox API
+
+    // Група: Робота з касою
+    function InitializeOptimalCashRegister(var Response: string): Boolean; // Ініціалізація оптимальної каси
+    procedure RefreshCashRegisterList;                        // Оновлення списку кас
+
+    // Група: Фіскалізація чеків
+    function RetryFiscalization(Receipt: TReceipt; MaxRetries: Integer): Boolean; // Повторна спроба фіскалізації
+    procedure ProcessPendingFiscalizations;                   // Обробка очікуючих фіскалізацій
+    procedure CheckPendingFiscalizations;                     // Перевірка очікуючих фіскалізацій
+    function WaitForReceiptFiscalization(const AReceiptId: string; // Очікування фіскалізації
+      TimeoutSeconds: Integer = 30): Boolean;
+
+    // Група: Обробка результатів фіскалізації
+    procedure HandleSuccessfulFiscalization(ACheckID: Integer; // Обробка успішної фіскалізації
       AReceipt: TReceipt; AReceiptResponse: TReceiptResponse);
-    procedure HandleFailedFiscalization(ACheckID: Integer; const AResponse: string);
-    procedure HandleFiscalizationException(ACheckID: Integer; E: Exception);
-    function ShouldRetryFiscalization(ACheckID: Integer; const AResponse: string; CurrentRetry: Integer): Boolean;
-    function IsNetworkError(const AResponse: string): Boolean;
-    procedure SaveReceiptToOfflineQueue(CheckID: Integer);
+    procedure HandleFailedFiscalization(ACheckID: Integer; const AResponse: string); // Обробка невдалої фіскалізації
+    procedure HandleFiscalizationException(ACheckID: Integer; E: Exception); // Обробка винятків фіскалізації
+    procedure SaveReceiptToOfflineQueue(CheckID: Integer);    // Збереження в офлайн-чергу
 
-    procedure CheckPendingFiscalizations;
-    function IsShiftReadyForFiscalization: Boolean;
-    function IsCashRegisterOnline: Boolean;
-    function WaitForReceiptFiscalization(const AReceiptId: string;
-        TimeoutSeconds: Integer = 30): Boolean;
+    // Група: Формування даних для чека
+    procedure FillMandatoryReceiptFields(Receipt: TReceipt; CheckID: Integer); // Заповнення обов'язкових полей
+    procedure FillGoodsFromDatabase(Receipt: TReceipt; CheckID: Integer); // Заповнення товарів з БД
+    procedure FillPaymentsFromDatabase(Receipt: TReceipt; CheckID: Integer); // Заповнення оплат з БД
+    function CreateTaxByGroup(TaxGroup: Integer): TTax;       // Створення податку за групою
+    function CalculateTotalSum(Goods: array of TGoodItem): Integer; // Розрахунок загальної суми
+    function DetermineTaxGroupForProduct(ProductCode: string): Integer; // Визначення податкової групи товару
 
-    procedure UpdateCashierInfo;
-    procedure ClearCashierInfo;
+    // Група: Робота з БД
+    procedure MarkCheckAsPrinted(CheckID: Integer);           // Позначення чека як надрукованого
+    procedure UpdateFiscalStatus(CheckID: Integer; Status: string; // Оновлення фіскального статусу
+      FiscalData: string = ''; ErrorText: string = '');
 
-    procedure UpdateStatusBar(StatusType: TStatusType; StatusValue: TStatusValue;AdditionalText: string = '');
-    procedure UpdateAPIStatus(AStatus: TStatusValue; const AAdditional: string = '');
-    procedure UpdateCashierStatus(AStatus: TStatusValue; const ACashierName: string = '');
-    procedure UpdateCashRegisterStatus(AStatus: TStatusValue; const ARegisterInfo: string = '');
-    procedure UpdateShiftStatus(AStatus: TStatusValue; const AShiftInfo: string = '');
-    procedure UpdateAllStatuses;
+    // Група: Допоміжні функції
+    function ExceptionToString(E: Exception): string;         // Конвертація винятку в рядок
+    function ReceiptStatusToString(Status: TReceiptStatus): string; // Конвертація статусу чека в рядок
+    procedure SaveStringToFile(const AFileName, AContent: string); // Збереження рядка у файл
 
-    procedure ChangePaymentType(CheckID: Integer; NewPaymentType: string;
-       CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
-    procedure SaveStringToFile(const AFileName, AContent: string);
-    // Допоміжні функції для роботи з Z-звітом
-    function ExtractZReportIdFromResponse(Response: string): string;
-    procedure GetZReportTextAndSave(ReportId: string);
-    procedure GetZReportPNGAndSave(ReportId: string);
+    // Група: Робота з Z-звітами
+    procedure ParseAndShowZReport(const AZReportJSON: string); // Парсинг та відображення Z-звіту
+    function ExtractZReportIdFromResponse(Response: string): string; // Вилучення ID Z-звіту з відповіді
+    procedure GetZReportTextAndSave(ReportId: string);         // Отримання та збереження текстового Z-звіту
+    procedure GetZReportPNGAndSave(ReportId: string);          // Отримання та збереження PNG Z-звіту
+
+    // Група: Оновлення інтерфейсу
+    procedure UpdateCashierInfo;                              // Оновлення інформації про касира
+    procedure ClearCashierInfo;                               // Очищення інформації про касира
+    procedure UpdateStatusBar(StatusType: TStatusType; StatusValue: TStatusValue; // Оновлення статус-бару
+      AdditionalText: string = '');
+    procedure UpdateAPIStatus(AStatus: TStatusValue; const AAdditional: string = ''); // Оновлення статусу API
+    procedure UpdateCashierStatus(AStatus: TStatusValue; const ACashierName: string = ''); // Оновлення статусу касира
+    procedure UpdateCashRegisterStatus(AStatus: TStatusValue; const ARegisterInfo: string = ''); // Оновлення статусу каси
+    procedure UpdateShiftStatus(AStatus: TStatusValue; const AShiftInfo: string = ''); // Оновлення статусу зміни
+    procedure UpdateAllStatuses;                              // Оновлення всіх статусів
+
+    // Група: Невикористовувані методи (залишені для майбутнього використання)
+    procedure ChangePaymentType(CheckID: Integer; NewPaymentType: string; // Зміна типу оплати
+      CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
 
   public
     { public declarations }
@@ -1270,29 +1357,68 @@ end;
 
 
 procedure TFmChek.btnWarrantyClick(Sender: TObject);
+begin
+  // Отримуємо дані через FDBManager, який тепер повертає DMMag.QGar
+  if Assigned(FDBManager.GetWarrantyProducts(
+    DMMag.QChekKOD.AsInteger,
+    DMMag.QChekSCHET.AsInteger
+  )) then
+  begin
+    frDBDataSet1.DataSource := DMMag.DSGar;
+    frDBDataSet1.DataSet := DMMag.QGar;
+    frReport1.LoadFromFile(reppath + '/gar_chek.lrf');
+    frReport1.ShowReport;
+    // Не закриваємо QGar, оскільки він може використовуватись деінде
+  end
+  else
+  begin
+    MessageDlg('Не вдалося отримати гарантійні товари', mtError, [mbOK], 0);
+  end;
+end;
+
+
+// Кнопка для експорту
+procedure TFmChek.btnWarrantyExportClick(Sender: TObject);
 var
   WarrantyDataSet: TDataSet;
+  CheckNumber, CheckDate, FullFileName: string;
 begin
-  // Отримуємо дані через FDBManager
   WarrantyDataSet := FDBManager.GetWarrantyProducts(
     DMMag.QChekKOD.AsInteger,
     DMMag.QChekSCHET.AsInteger
   );
 
-  if Assigned(WarrantyDataSet) then
+  if Assigned(WarrantyDataSet) and (WarrantyDataSet.RecordCount > 0) then
   begin
-    // Налаштовуємо звіт
-    frDBDataSet1.DataSource := DMMag.DSGar; // або створити окремий DataSource
-    frDBDataSet1.DataSet := WarrantyDataSet;
-    frReport1.LoadFromFile(reppath + '/gar_chek.lrf');
-    frReport1.ShowReport;
+    // Використовуємо номер ЧЕКА (не рахунку)
+    if DMMag.QChekNOMER.IsNull then
+      CheckNumber := 'без номера'
+    else
+      CheckNumber := DMMag.QChekNOMER.AsString;
 
-    // Закриваємо DataSet через менеджер
-    FDBManager.CloseWarrantyDataSet;
+    // Використовуємо поточну дату
+    CheckDate := FormatDateTime('dd.mm.yyyy', Date);
+
+    // Формуємо повне ім'я файлу
+    FullFileName := FpsExporter.ExportPath + 'Гарантія_чек_' + CheckNumber + '.ods';
+
+    if FpsExporter.ExportWarrantyProducts(WarrantyDataSet,
+       'Гарантія_чек_' + CheckNumber, efODS,
+       CheckNumber,
+       CheckDate) then
+    begin
+      // Відкриваємо файл в застосунку за замовчуванням
+      if FileExists(FullFileName) then
+        OpenDocument(FullFileName)
+      else
+        ShowMessage('Файл не знайдено: ' + FullFileName);
+    end
+    else
+      ShowMessage('Помилка експорту гарантійних товарів!');
   end
   else
   begin
-    MessageDlg('Не вдалося отримати гарантійні товари', mtError, [mbOK], 0);
+    MessageDlg('Не вдалося отримати гарантійні товарів', mtError, [mbOK], 0);
   end;
 end;
 
@@ -2230,101 +2356,6 @@ begin
       end;
     end;
   end;
-end;
-
-procedure TFmChek.btnSendReceiptClick(Sender: TObject);
-var
-  Receipt: TReceipt;
-  Good: TGood;
-  GoodItem: TGoodItem;
-  Payment: TPayment;
-  Response: string;
-  ReceiptResponse: TReceiptResponse;
-  Success: Boolean;
-begin
-  if not Assigned(FReceiptAPI) or not FReceiptAPI.IsTokenValid then
-  begin
-    Log('API не ініціалізовано або токен недійсний!');
-    Exit;
-  end;
-
-  try
-    Log('Початок створення чека...');
-
-    // Створюємо основний об'єкт чека
-    Receipt := TReceipt.Create;
-
-    // Заповнюємо основні дані чека
-    //Receipt.Id := FReceiptAPI.GenerateUUID; // Генеруємо унікальний ID
-    Receipt.Id := TGUID.NewGuid.ToString;
-    Receipt.CashierName := 'Іванов І.І.';
-    Receipt.Departament := 'Головний відділ';
-    Receipt.OrderId := 'ORDER-12345';
-    Receipt.Header := 'Чек покупки';
-    Receipt.Footer := 'Дякуємо за покупку!';
-    Receipt.Rounding := True;
-
-    // Створюємо товар
-    Good := FReceiptAPI.CreateGood(
-      '123456',          // Код товару
-      'Телефон Samsung', // Назва товару
-      1999900            // Ціна у копійках (19999.00 грн)
-    );
-
-    // Створюємо позицію товару в чеку
-    GoodItem := FReceiptAPI.CreateGoodItem(Good, 1000); // 1000 = 1 шт (у тисячах)
-    GoodItem.TotalSum := 1999900; // Загальна сума за позицію
-
-    // Додаємо товар до чека
-    SetLength(Receipt.Goods, 1);
-    Receipt.Goods[0] := GoodItem;
-
-    // Створюємо оплату
-    Payment := FReceiptAPI.CreatePayment(ptCashless, 1999900); // Безготівкова оплата
-    Payment.LabelText := 'Оплата карткою';
-    Payment.CardMask := '****1234';
-    Payment.BankName := 'ПриватБанк';
-
-    // Додаємо оплату до чека
-    SetLength(Receipt.Payments, 1);
-    Receipt.Payments[0] := Payment;
-
-    Log('Чек створено. Відправка через HTTP...');
-
-    // Відправляємо чек
-    Success := FReceiptAPI.SendReceiptCurl(Receipt, Response, ReceiptResponse);
-
-    if Success and Assigned(ReceiptResponse) then
-    begin
-      Log('Чек успішно відправлено!');
-      Log('ID чека: ' + ReceiptResponse.Id);
-      Log('Фіскальний номер: ' + ReceiptResponse.FiscalCode);
-      Log('Статус: ' + IntToStr(Ord(ReceiptResponse.Status)));
-
-      // Можна використовувати додаткові дані з відповіді
-      if ReceiptResponse.Status = rsDone then
-        Log('Чек успішно опрацьовано!');
-
-      // Важливо: звільняємо пам'ять відповіді
-      FreeAndNil(ReceiptResponse);
-    end
-    else
-    begin
-      Log('Помилка відправки чека: ' + Response);
-      ShowMessage('Помилка відправки: ' + Response);
-    end;
-
-  except
-    on E: Exception do
-    begin
-      Log('Виняток при створенні/відправці чека: ' + E.Message);
-      ShowMessage('Помилка: ' + E.Message);
-    end;
-  end;
-
-  // Важливо: звільняємо пам'ять чека
-  if Assigned(Receipt) then
-    FreeAndNil(Receipt);
 end;
 
 
@@ -4501,7 +4532,6 @@ begin
   edtCashRegisterId.Enabled := Functionality;
   edtShiftId.Enabled := Functionality;
   fseAmount.Enabled := Functionality;
-  chkSkipClientNameCheck.Enabled := Functionality;
 
   // Оновлюємо статуси
   if Functionality then
@@ -5390,37 +5420,6 @@ end;
 
 //------------------------------------------------------------------
 
-// Конвертація звичайного чека в службовий
-procedure TFmChek.ConvertToNonFiscalCheck(CheckID: Integer);
-begin
-  if MessageDlg('Конвертація чека в службовий',
-      'Цей чек більше не буде фіскалізований. Продовжити?',
-      mtWarning, [mbYes, mbNo], 0) = mrYes then
-  begin
-    DMMag.SQLQ.SQL.Text :=
-      'UPDATE CHEK SET FISCAL_STATUS = ''NON_FISCAL'' WHERE KOD = :CHECK_ID';
-    DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-    DMMag.SQLQ.ExecSQL;
-
-    Log('Чек ' + IntToStr(CheckID) + ' конвертовано в службовий');
-    ShowMessage('Чек конвертовано в службовий');
-  end;
-end;
-
-// Конвертація службового чека назад у фіскальний
-procedure TFmChek.ConvertToFiscalCheck(CheckID: Integer);
-begin
-  DMMag.SQLQ.SQL.Text :=
-    'UPDATE CHEK SET FISCAL_STATUS = ''PENDING'' WHERE KOD = :CHECK_ID';
-  DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-  DMMag.SQLQ.ExecSQL;
-
-  Log('Службовий чек ' + IntToStr(CheckID) + ' конвертовано назад у фіскальний');
-  ShowMessage('Чек тепер очікує фіскалізації');
-end;
-
-
-
 procedure TFmChek.FillMandatoryReceiptFields(Receipt: TReceipt; CheckID: Integer);
 begin
   Receipt.Id := FReceiptAPI.GenerateUUID;
@@ -5781,106 +5780,6 @@ begin
   Log('=== КІНЕЦЬ FillPaymentsFromDatabase ===');
 end;
 
-function TFmChek.ValidateReceiptStructure(Receipt: TReceipt): Boolean;
-var
-  ErrorMessages: TStringList;
-begin
-  ErrorMessages := TStringList.Create;
-  try
-    // Перевірка обов'язкових полів
-    if Receipt.Id = '' then
-      ErrorMessages.Add('Відсутній ID чека');
-
-    if Receipt.CashierName = '' then
-      ErrorMessages.Add('Відсутнє імʼя касира');
-
-    if Receipt.Departament = '' then
-      ErrorMessages.Add('Відсутній відділ');
-
-    if Length(Receipt.Goods) = 0 then
-      ErrorMessages.Add('Чек не містить товарів');
-
-    if Length(Receipt.Payments) = 0 then
-      ErrorMessages.Add('Чек не містить оплат');
-
-    if Receipt.TotalSum <= 0 then
-      ErrorMessages.Add('Сума чека має бути більше 0');
-
-    // Перевірка коректності товарів
-    if not ValidateGoods(Receipt.Goods) then
-      ErrorMessages.Add('Знайдено помилки в товарах');
-
-    Result := ErrorMessages.Count = 0;
-
-    if not Result then
-    begin
-      ShowMessage('Помилки в структурі чека:' + sLineBreak +
-                 ErrorMessages.Text);
-      Log('Помилки валідації чека: ' + ErrorMessages.Text);
-    end
-    else
-    begin
-      Log('Структура чека успішно пройшла валідацію');
-    end;
-
-  finally
-    ErrorMessages.Free;
-  end;
-end;
-
-function TFmChek.ValidateGoods(Goods: array of TGoodItem): Boolean;
-var
-  i: Integer;
-begin
-  Result := True;
-
-  for i := 0 to High(Goods) do
-  begin
-    if not Assigned(Goods[i]) then
-    begin
-      Log('Помилка: товар ' + IntToStr(i) + ' не ініціалізований');
-      Result := False;
-      Continue;
-    end;
-
-    if not Assigned(Goods[i].Good) then
-    begin
-      Log('Помилка: обʼєкт товару ' + IntToStr(i) + ' не ініціалізований');
-      Result := False;
-      Continue;
-    end;
-
-    if Goods[i].Good.Code = '' then
-    begin
-      Log('Помилка: товар ' + IntToStr(i) + ' не має коду');
-      Result := False;
-    end;
-
-    if Goods[i].Good.Name = '' then
-    begin
-      Log('Помилка: товар ' + IntToStr(i) + ' не має назви');
-      Result := False;
-    end;
-
-    if Goods[i].Good.Price <= 0 then
-    begin
-      Log('Помилка: товар ' + IntToStr(i) + ' має нульову або відʼємну ціну');
-      Result := False;
-    end;
-
-    if Goods[i].Quantity <= 0 then
-    begin
-      Log('Помилка: товар ' + IntToStr(i) + ' має нульову або відʼємну кількість');
-      Result := False;
-    end;
-
-    if Goods[i].TotalSum <= 0 then
-    begin
-      Log('Помилка: товар ' + IntToStr(i) + ' має нульову або відʼємну загальну суму');
-      Result := False;
-    end;
-  end;
-end;
 
 function TFmChek.CalculateTotalSum(Goods: array of TGoodItem): Integer;
 var
