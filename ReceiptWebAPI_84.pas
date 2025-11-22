@@ -759,15 +759,12 @@ type
                out ACashRegisterId: string; out AResponse: string): Boolean;
     function InitializeFirstCashRegister(out AResponse: string): Boolean;
     function InitializeCashRegister(const AFiscalNumber: string; out AResponse: string): Boolean;
-    function CheckCashRegisterMode(const ACashRegisterId: string; out AResponse: string): Boolean;
     function GoOnlineCurl(out AResponse: string): Boolean;
     function WaitForOnlineMode(out AResponse: string;ATimeoutSec: Integer = 300): Boolean;
     function GoOfflineCurl(out AResponse: string): Boolean;
     function WaitForOfflineMode(out AResponse: string;ATimeoutSec: Integer = 300): Boolean;
     function OpenShiftCurl(const AShiftId, AFiscalCode, AFiscalDate: string;
       out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
-    function OpenShiftWithRecovery(const AShiftId, AFiscalCode, AFiscalDate: string;
-       out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
     function CloseShiftSimpleCurl(const AShiftId: string; out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
     function CloseShiftWithReportCurl(ASkipClientNameCheck: Boolean; AReport: TShiftReport;
       const AFiscalCode, AFiscalDate: string; out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
@@ -776,8 +773,6 @@ type
     function WaitForShiftStatus(const AShiftId: string;
       const ATargetStatus: string; out AResponse: string;
       out AShiftStatus: TShiftStatus; ATimeoutSec: Integer = 60): Boolean;
-    function CheckCurrentShift(out AResponse: string;
-      out AShiftStatus: TShiftStatus): Boolean;
     function GetCurrentShiftIdCurl(out AResponse: string): string;
     function RecoverShift(out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
     function GetZReportCurl(const AShiftId: string; out AResponse: string): Boolean;
@@ -786,11 +781,9 @@ type
     function GetShiftBalance(out ABalance: Integer; out AResponse: string): Boolean;
     function GetShiftBalanceDirect(out ABalance: Integer; out AResponse: string): Boolean;
     procedure SaveBalanceData(JsonData: TJSONObject);
-    function GetBalanceData: TShiftBalanceData;
     function GetShiftXReportCurl(const AShiftId: string; out AResponse: string; out AShiftReport: TShiftReport): Boolean;
     function GetCurrentBalance(out AResponse: string): Integer;
     function ForceBalanceUpdate(out AResponse: string): boolean;
-    procedure LoadShiftIdFromFile;
     procedure SaveShiftIdToFile;
     procedure SaveShiftToFile(const AShiftId: string);
     function LoadShiftFromFile: string;
@@ -803,25 +796,18 @@ type
     function GetOfflineQueueStatus: Integer;
     function CashInCurl(AAmount: Integer; ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
     function CashOutCurl(AAmount: Integer; ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
-    function CreateCashOperation(AOperationType: TCashOperationType; AAmount: Integer; ADescription: string): TCashOperation;
     function CashIncome(AAmount: Integer; ADescription: string;
              out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
     function CashOutcome(AAmount: Integer; ADescription: string;
              out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
     function ServiceCashOperation(AOperationType: string; AAmount: Integer;
               ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
-    function ExtractBalanceFromShiftStatus(const JSONString: string): Integer;
     function CreateGood(ACode, AName: string; APrice: Integer): TGood;
     function CreateGoodItem(AGood: TGood; AQuantity: Integer): TGoodItem;
     function CreatePayment(APaymentType: TPaymentType; AValue: Integer): TPayment;
-    function CreateDelivery(AEmail, APhone: string): TDelivery;
-    function CreateServiceOperation(AOperationType: string; AAmount: Integer; ADescription: string): TServiceOperation;
-    function CreateSignature(ASignatureType, AValue: string): TSignature;
 
-    function StringToReceiptType(const ATypeStr: string): TReceiptType;
     function ReceiptTypeToString(AReceiptType: TReceiptType): string;
     function CreateTaxByGroup(const ATaxGroup: string): TTax;
-    function CalculateTaxValue(APrice: Integer; ATaxRate: Double): Double;
     function ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
 
     procedure HandleAuthState(Action: TAuthAction);
@@ -3044,13 +3030,6 @@ begin
   Result.Value := AValue;
 end;
 
-function TReceiptWebAPI.CreateDelivery(AEmail, APhone: string): TDelivery;
-begin
-  Result := TDelivery.Create;
-  Result.Email := AEmail;
-  Result.Phone := APhone;
-end;
-
 
 function TReceiptWebAPI.ParseCashRegisterStatus(const JSONString: string;
   out ACashRegisterStatus: TCashRegisterStatus): Boolean;
@@ -4090,24 +4069,6 @@ begin
 end;
 
 
-function TReceiptWebAPI.CheckCurrentShift(out AResponse: string;
-  out AShiftStatus: TShiftStatus): Boolean;
-begin
-  Result := False;
-  AShiftStatus := nil;
-
-  if FCurrentShiftId = '' then
-  begin
-    AResponse := 'Немає збереженого ID зміни';
-    Exit;
-  end;
-
-  Log('Перевірка поточної зміни: ' + FCurrentShiftId);
-  Result := GetShiftStatusCurl(FCurrentShiftId, AResponse, AShiftStatus);
-end;
-
-
-
 function TReceiptWebAPI.GetCurrentShiftIdCurl(out AResponse: string): string;
 var
   Command: string;
@@ -4170,27 +4131,6 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.OpenShiftWithRecovery(const AShiftId, AFiscalCode, AFiscalDate: string;
-  out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
-begin
-  // Спроба знайти вже відкриту зміну
-  CurrentShiftId := GetCurrentShiftIdCurl(AResponse);
-
-  if CurrentShiftId <> '' then
-  begin
-    // Використовуємо знайдену зміну
-    FCurrentShiftId := CurrentShiftId;
-    Result := GetShiftStatusCurl(CurrentShiftId, AResponse, AShiftStatus);
-    if Result then
-      Log('Відновлено існуючу зміну: ' + CurrentShiftId);
-  end
-  else
-  begin
-    // Створюємо нову зміну
-    Result := OpenShiftCurl(AShiftId, AFiscalCode, AFiscalDate, AResponse, AShiftStatus);
-  end;
-end;
-
 
 procedure TReceiptWebAPI.SaveShiftIdToFile;
 var
@@ -4203,33 +4143,6 @@ begin
   try
     IniFile.WriteString('Shift', 'ID', FCurrentShiftId);
     IniFile.WriteDateTime('Shift', 'LastUpdate', Now);
-  finally
-    IniFile.Free;
-  end;
-end;
-
-procedure TReceiptWebAPI.LoadShiftIdFromFile;
-var
-  IniFile: TIniFile;
-  ConfigDir: string;
-begin
-  ConfigDir := GetAppConfigDir(False);
-  if not DirectoryExists(ConfigDir) then
-    Exit;
-
-  IniFile := TIniFile.Create(ConfigDir + 'shift.ini');
-  try
-    FCurrentShiftId := IniFile.ReadString('Shift', 'ID', '');
-    // Перевіряємо чи зміна ще актуальна (не старіша за 24 години)
-    if (FCurrentShiftId <> '') and
-       (HoursBetween(Now, IniFile.ReadDateTime('Shift', 'LastUpdate', 0)) < 24) then
-    begin
-      Log('Завантажено збережену зміну: ' + FCurrentShiftId);
-    end
-    else
-    begin
-      FCurrentShiftId := '';
-    end;
   finally
     IniFile.Free;
   end;
@@ -4749,22 +4662,6 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.CreateServiceOperation(AOperationType: string; AAmount: Integer; ADescription: string): TServiceOperation;
-begin
-  Result := TServiceOperation.Create;
-  Result.OperationType := AOperationType;
-  Result.Amount := AAmount;
-  Result.Description := ADescription;
-end;
-
-function TReceiptWebAPI.CreateSignature(ASignatureType, AValue: string): TSignature;
-begin
-  Result := TSignature.Create;
-  Result.SignatureType := ASignatureType;
-  Result.Value := AValue;
-end;
-
-
 
 function TReceiptWebAPI.CancelReceiptCurl(const AReceiptId, AReason: string; out AResponse: string): Boolean;
 var
@@ -5265,34 +5162,6 @@ begin
   end;
 end;
 
-
-function TReceiptWebAPI.CheckCashRegisterMode(const ACashRegisterId: string;
-  out AResponse: string): Boolean;
-var
-  CashRegisterStatus: TCashRegisterStatus;
-begin
-  Result := False;
-
-  if GetCashRegisterStatusCurl(ACashRegisterId, AResponse, CashRegisterStatus) then
-  begin
-    try
-      if Assigned(CashRegisterStatus) then
-      begin
-        Log('Режим каси: OfflineMode=' + BoolToStr(CashRegisterStatus.OfflineMode, True) +
-            ', StayOffline=' + BoolToStr(CashRegisterStatus.StayOffline, True));
-
-        // Перевіряємо, чи підтримується онлайн-режим
-        Result := not CashRegisterStatus.StayOffline;
-
-        if not Result then
-          AResponse := 'Каса налаштована на роботу тільки в офлайн-режимі';
-      end;
-    finally
-      if Assigned(CashRegisterStatus) then
-        FreeAndNil(CashRegisterStatus);
-    end;
-  end;
-end;
 
 
 function TReceiptWebAPI.InitializeCashRegister(const AFiscalNumber: string; out AResponse: string): Boolean;
@@ -6037,13 +5906,6 @@ begin
     end;
   end;
 end;
-function TReceiptWebAPI.CreateCashOperation(AOperationType: TCashOperationType; AAmount: Integer; ADescription: string): TCashOperation;
-begin
-  Result := TCashOperation.Create;
-  Result.OperationType := AOperationType;
-  Result.Amount := AAmount;
-  Result.Description := ADescription;
-end;
 
 // Додайте цей метод до TReceiptWebAPI
 function TReceiptWebAPI.GetShiftBalance(out ABalance: Integer; out AResponse: string): Boolean;
@@ -6262,10 +6124,6 @@ begin
       FloatToStrF(FBalanceData.Balance / 100, ffNumber, 10, 2) + ' грн');
 end;
 
-function TReceiptWebAPI.GetBalanceData: TShiftBalanceData;
-begin
-  Result := FBalanceData;
-end;
 
 function TReceiptWebAPI.GetShiftZReportCurl(const AReportId: string; out AResponse: string): Boolean;
 var
@@ -7130,42 +6988,6 @@ begin
 end;
 
 
-function TReceiptWebAPI.ExtractBalanceFromShiftStatus(const JSONString: string): Integer;
-var
-  JsonParser: TJSONParser;
-  JsonData, BalanceObj: TJSONObject;
-begin
-  Result := 0;
-  try
-    JsonParser := TJSONParser.Create(JSONString, [joUTF8]);
-    try
-      JsonData := JsonParser.Parse as TJSONObject;
-
-      // Спроба №1: баланс в об'єкті balance
-      if (JsonData.Find('balance') <> nil) and
-         (JsonData.Items[JsonData.IndexOfName('balance')].JSONType = jtObject) then
-      begin
-        BalanceObj := JsonData.Objects['balance'];
-        Result := BalanceObj.Get('balance', 0);
-      end
-      // Спроба №2: баланс в корені
-      else if JsonData.Find('balance') <> nil then
-      begin
-        Result := JsonData.Get('balance', 0);
-      end;
-
-    finally
-      JsonData.Free;
-    end;
-  except
-    on E: Exception do
-    begin
-      Log('Помилка парсингу балансу: ' + E.Message);
-      Result := 0;
-    end;
-  end;
-end;
-
 function TReceiptWebAPI.FormatBalanceInfo(Balance: TBalanceInfo): string;
 begin
   if not Assigned(Balance) then
@@ -7505,22 +7327,6 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.StringToReceiptType(const ATypeStr: string): TReceiptType;
-begin
-  if ATypeStr = 'SELL' then
-    Result := rtSell
-  else if ATypeStr = 'RETURN' then
-    Result := rtReturn
-  else if ATypeStr = 'SERVICE_IN' then
-    Result := rtServiceIn
-  else if ATypeStr = 'SERVICE_OUT' then
-    Result := rtServiceOut
-  else if ATypeStr = 'CASH_WITHDRAWAL' then
-    Result := rtCashWithdrawal
-  else
-    Result := rtSell;
-end;
-
 
 // Додати нові функції для роботи з податками
 function TReceiptWebAPI.CreateTaxByGroup(const ATaxGroup: string): TTax;
@@ -7565,12 +7371,6 @@ begin
     Result.LabelText := 'ПДВ 0%';
     Result.Symbol := '🟩';
   end;
-end;
-
-function TReceiptWebAPI.CalculateTaxValue(APrice: Integer; ATaxRate: Double): Double;
-begin
-  // Розрахунок суми податку в копійках
-  Result := (APrice * ATaxRate) / (100 + ATaxRate);
 end;
 
 function TReceiptWebAPI.ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
