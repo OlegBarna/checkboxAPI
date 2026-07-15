@@ -10,8 +10,8 @@ uses
   LR_Class, LR_DBSet, LR_BarC, DKlient, DRek, dgssch,  dsch, splash,
   dsopl, dvras, sprop, kredit, printers, Menus, EditBtn, dklgrupa,dndata,
   dklnt, dgtov, LCLType, ComCtrls, Spin, ReceiptWebAPI, DateUtils,
-  fpjson, jsonparser, jsonscanner,StrUtils, DB,  FiscalCheckViewer, uchekdb,
-  uFpsExport,LCLIntf;
+  fpjson, jsonparser, jsonscanner,StrUtils, DB,  FiscalCheckViewer, chekdb,
+  uFpsExport,LCLIntf,chektypes;
 
 type
   TStatusType = (stAPI, stCashier, stCashRegister, stShift);
@@ -23,11 +23,13 @@ type
     // === КОМПОНЕНТИ ФОРМИ ===
     // Основні елементи керування
     btbtnSendReceiptCurl: TBitBtn;
+    btnCloseShiftWithReportCurl: TButton;
     btnCreateCheck: TBitBtn;
     btnCheckErase: TBitBtn;
     btnCheckPrint: TBitBtn;
     btnCheckCancel: TBitBtn;
     btnCreateNonFiscalCheck: TBitBtn;
+    btnOpenShift: TButton;
     btnWarranty: TBitBtn;
     btnWarrantyExport: TBitBtn;
 
@@ -56,12 +58,9 @@ type
     btnGoOnline: TButton;
     btnGoOffline: TButton;
 
-    // Checkbox API - робота зі зміною
-    btnOpenShift: TButton;
     btnOpenShiftCurl: TButton;
     btnGetShiftStatusCurl: TButton;
     btnCloseShiftSimpleCurl: TButton;
-    btnCloseShiftWithReportCurl: TButton;
     btnForsedShiftClose: TButton;
     btnRecoverShift: TButton;
     btnGetXReport: TButton;
@@ -75,7 +74,9 @@ type
     chkPreferTestCashRegister: TCheckBox;
     chkUseCheckboxAPI: TCheckBox;
     cmbCashRegisters: TComboBox;
-    DBComboPaymentType: TDBComboBox;
+    cmbPaymentType: TComboBox;
+    cmbCashlessSubType: TComboBox;
+    cmbProvider: TComboBox;
 
     // Бази даних та навігація
     DBGrid1: TDBGrid;
@@ -85,6 +86,12 @@ type
     DBNavigator5: TDBNavigator;
     DBNavigator6: TDBNavigator;
     DBText1: TDBText;
+    DBText2: TDBText;
+    edtCardMask: TEdit;
+    edtAuthCode: TEdit;
+    edtRRN: TEdit;
+    edtIBAN: TEdit;
+    edtRecipientName: TEdit;
 
     // Поля вводу даних
     edtPinCode: TEdit;
@@ -108,12 +115,19 @@ type
     GroupBox1: TGroupBox;
     gbLoginType: TGroupBox;
     GroupBox2: TGroupBox;
+    GroupBox3: TGroupBox;
+    gbPaymentDetails: TGroupBox;
+    // === ДОДАНО: компоненти для деталей оплати ===
+    gbCardDetails: TGroupBox;
+    gbInternetBanking: TGroupBox;
+    // === КІНЕЦЬ ДОДАНО ===
     grpActions: TGroupBox;
     grpAdditional: TGroupBox;
     grpAuthentication: TGroupBox;
     grpCashRegister: TGroupBox;
     grpConnection: TGroupBox;
     grpShiftOperations: TGroupBox;
+    memPaymentPurpose: TMemo;
 
     // Радіокнопки авторизації
     rbPinCode: TRadioButton;
@@ -172,6 +186,10 @@ type
     // === ОБРОБНИКИ ПОДІЙ ===
 
     // Події життєвого циклу форми
+    procedure cmbCashlessSubTypeChange(Sender: TObject);
+    procedure cmbPaymentTypeChange(Sender: TObject);
+    procedure edtCardMaskChange(Sender: TObject);
+    procedure edtIBANChange(Sender: TObject);
     procedure FormCreate(Sender: TObject);                    // Створення форми
     procedure FormShow(Sender: TObject);                      // Показ форми
     procedure FormClose(Sender: TObject; var CloseAction: TCloseAction); // Закриття форми
@@ -190,7 +208,7 @@ type
     procedure PageControl1Change(Sender: TObject);            // Зміна вкладки
     procedure tsCashShow(Sender: TObject);                    // Показ вкладки готівки
     procedure cmbCashRegistersChange(Sender: TObject);        // Зміна вибраної каси
-    procedure DBComboPaymentTypeChange(Sender: TObject);      // Зміна типу оплати
+    // procedure DBComboPaymentTypeChange(Sender: TObject);      // ВИДАЛЕНО
 
     // Події налаштувань
     procedure chkUseCheckboxAPIClick(Sender: TObject);        // Перемикач Checkbox API
@@ -255,15 +273,18 @@ type
     // Checkbox API - фіскалізація
     procedure btbtnSendReceiptCurlClick(Sender: TObject);     // Відправка фіскального чека
 
+    function IsTaxGroupValid(TaxGroup: Integer): Boolean;
+
   private
     // === ПОЛЯ КЛАСУ ===
+    FTempCurrentKlient: Integer;
+    FPreviousUseCheckboxAPI: Boolean;
 
     // Менеджери та API
     FDBManager: TChekDBManager;                               // Менеджер роботи з БД
     FReceiptAPI: TReceiptWebAPI;                              // API для роботи з Checkbox
 
     // Шляхи до файлів
-    datavv, nomer, psvid, nalkod, pnazva, pnazshort: string;  // Дані для звітів
     reppath: string;                                          // Шлях до звітів
     logpath: string;                                          // Шлях до логів
     receiptspath: String;                                     // Шлях до чеків
@@ -275,6 +296,12 @@ type
     PinLogin: Boolean;                                        // Авторизація за PIN-кодом
     FPreferTestCashRegister: Boolean;                         // Пріоритет тестової каси
     GoodsTaxGroup: integer;                                   // Податкова група товарів
+
+    FPrinterName: string;
+    FPageLeft: Integer;
+    FPageTop: Integer;
+    FPageWidth: Integer;
+    FPageScale: Integer;
 
     // Інформація про касира
     FCashierNameFromIni: string;                              // Ім'я касира з конфігурації
@@ -297,6 +324,10 @@ type
     FUpdatingPaymentType: Boolean;                            // Оновлення типу оплати
 
     // === ПРИВАТНІ МЕТОДИ ===
+    procedure LoadSettingsFromINI;
+
+    // запуск
+    procedure InitializeCheckboxAPI;  // Ініціалізація Checkbox API: каса + зміна + статуси
 
     // Група: Перевірки та валідації
     function DBManagerReady: Boolean;                         // Перевірка готовності менеджера БД
@@ -312,8 +343,7 @@ type
     function IsCashRegisterOnline: Boolean;                   // Перевірка онлайн-статусу каси
     function IsNetworkError(const AResponse: string): Boolean; // Перевірка мережевої помилки
     function ShouldRetryFiscalization(ACheckID: Integer;      // Визначення необхідності повторної спроби
-      const AResponse: string; CurrentRetry: Integer): Boolean;
-
+      const AResponse: string; CurrentRetry: Integer; const ReceiptIdAlreadySent: string): Boolean;
     // Група: Робота з готівкою та сумами
     function GetAmountInKopiyky: Integer;                     // Конвертація суми в копійки
     procedure UpdateCashBalance;                              // Оновлення відображення балансу
@@ -354,8 +384,8 @@ type
       AReceipt: TReceipt; AReceiptResponse: TReceiptResponse);
     procedure HandleFailedFiscalization(ACheckID: Integer; const AResponse: string); // Обробка невдалої фіскалізації
     procedure HandleFiscalizationException(ACheckID: Integer; E: Exception); // Обробка винятків фіскалізації
-    procedure SaveReceiptToOfflineQueue(CheckID: Integer);    // Збереження в офлайн-чергу
-
+    procedure SaveReceiptToOfflineQueue(CheckID: Integer;    // Збереження в офлайн-чергу
+                      Receipt: TReceipt; const JsonString, ErrorResponse: string);
     // Група: Формування даних для чека
     procedure FillMandatoryReceiptFields(Receipt: TReceipt; CheckID: Integer); // Заповнення обов'язкових полей
     procedure FillGoodsFromDatabase(Receipt: TReceipt; CheckID: Integer); // Заповнення товарів з БД
@@ -391,9 +421,37 @@ type
     procedure UpdateShiftStatus(AStatus: TStatusValue; const AShiftInfo: string = ''); // Оновлення статусу зміни
     procedure UpdateAllStatuses;                              // Оновлення всіх статусів
 
+    // Група: Діагностика та налагодження
+    procedure LogTokenStatus;                               // Логування статусу токена авторизації
+
     // Група: Невикористовувані методи (залишені для майбутнього використання)
     procedure ChangePaymentType(CheckID: Integer; NewPaymentType: string; // Зміна типу оплати
       CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
+
+    // === КЕРУВАННЯ ВИДИМІСТЮ UI ===
+    procedure UpdatePaymentUIVisibility;
+    procedure ShowCardDetails(AShow: Boolean);
+    procedure ShowInternetBankingDetails(AShow: Boolean);
+    procedure ShowIntegratorDetails(AShow: Boolean);
+
+    // === ВАЛІДАЦІЯ ===
+    function ValidateIBAN(const AIBAN: string): Boolean;
+    function ValidateCardMask(const AMask: string): Boolean;
+    function ValidateRRN(const ARRN: string): Boolean;
+    function ValidateAuthCode(const ACode: string): Boolean;
+    function ValidatePaymentFields: Boolean;
+
+    // === РОБОТА З ПЛАТЕЖАМИ ===
+    function BuildPaymentFromUI: TPayment;
+    procedure LoadPaymentToUI(CheckID: Integer);
+    procedure SavePaymentToDB(CheckID: Integer);
+    function IsCashlessSubTypeNeedingDetails(SubType: Integer): Boolean;
+
+    // === КОНВЕРТАЦІЯ ІНДЕКСІВ ===
+    function PaymentTypeIndexToStr(Index: Integer): string;
+    function PaymentTypeStrToIndex(const S: string): Integer;
+    function SubTypeIndexToCode(Index: Integer): Integer;
+    function SubTypeCodeToIndex(Code: Integer): Integer;
 
   public
     { public declarations }
@@ -489,7 +547,7 @@ begin
   FCurrentBalance := -1;
   FLastBalanceUpdate := 0;
   FIsProcessingFiscalization := False;
-  GoodsTaxGroup := 8;
+  GoodsTaxGroup := 8; // задано вручну групу для оподаткування потім зчитаємо з іні-файлу
 
   // Ініціалізація менеджера БД (поки що без параметрів, schet ще не відомий)
   FDBManager := nil;
@@ -526,6 +584,143 @@ begin
   UpdateShiftStatus(svUnknown);
 
   Log('Форма створена - початкова ініціалізація завершена');
+end;
+
+// ===== ВИПРАВЛЕНИЙ ОБРОБНИК cmbPaymentTypeChange =====
+procedure TFmChek.cmbPaymentTypeChange(Sender: TObject);
+var
+  PaymentTypeStr: string;
+  CheckID: Integer;
+begin
+  // Захист від рекурсії
+  if FUpdatingPaymentType then Exit;
+
+  // Захист від програмних змін (реагуємо тільки на дії користувача)
+  if not cmbPaymentType.Focused then Exit;
+
+  FUpdatingPaymentType := True;
+  try
+    PaymentTypeStr := PaymentTypeIndexToStr(cmbPaymentType.ItemIndex);
+    Log('Зміна типу оплати: ' + PaymentTypeStr);
+
+    if not FDBManager.CanModifyCheck then
+    begin
+      // Відкат — повертаємо старе значення
+      LoadPaymentToUI(DMMag.QChekKOD.AsInteger);
+      Exit;
+    end;
+
+    case cmbPaymentType.ItemIndex of
+      0: begin // Готівка
+           cmbCashlessSubType.Visible := False;
+           gbPaymentDetails.Visible := False;
+           if not DMMag.QChekKOD.IsNull then
+             FDBManager.UpdatePaymentInfo(DMMag.QChekKOD.AsInteger,
+               'CASH', DMMag.QChekSUMMA.AsFloat, 0, 0);
+         end;
+
+      1: begin // Безготівка
+           cmbCashlessSubType.Visible := True;
+           cmbCashlessSubType.ItemIndex := 0; // Картка за замовчуванням
+           UpdatePaymentUIVisibility;
+         end;
+
+      2: begin // Інше
+           cmbCashlessSubType.Visible := False;
+           gbPaymentDetails.Visible := False;
+           if not DMMag.QChekKOD.IsNull then
+             FDBManager.UpdatePaymentInfo(DMMag.QChekKOD.AsInteger,
+               'OTHER', DMMag.QChekSUMMA.AsFloat, 0, 0);
+         end;
+    end;
+
+  finally
+    FUpdatingPaymentType := False;
+  end;
+end;
+
+// ===== ВИПРАВЛЕНИЙ ОБРОБНИК edtCardMaskChange =====
+procedure TFmChek.edtCardMaskChange(Sender: TObject);
+var
+  S: string;
+  i: Integer;
+begin
+  if FUpdatingPaymentType then Exit;
+
+  S := edtCardMask.Text;
+
+  // Фільтруємо: тільки * та 0-9
+  for i := Length(S) downto 1 do
+    if not (S[i] in ['*', '0'..'9']) then
+      Delete(S, i, 1);
+
+  // Обмежуємо довжину 19 символів
+  if Length(S) > 19 then
+    S := Copy(S, 1, 19);
+
+  // Встановлюємо відфільтроване значення
+  if S <> edtCardMask.Text then
+  begin
+    edtCardMask.Text := S;
+    edtCardMask.SelStart := Length(S);
+  end;
+end;
+
+// ===== ВИПРАВЛЕНИЙ ОБРОБНИК edtIBANChange =====
+procedure TFmChek.edtIBANChange(Sender: TObject);
+var
+  S: string;
+  i: Integer;
+begin
+  if FUpdatingPaymentType then Exit;
+
+  S := UpperCase(edtIBAN.Text);
+
+  // Фільтруємо: тільки U, A, 0-9
+  for i := Length(S) downto 1 do
+    if not (S[i] in ['U', 'A', '0'..'9']) then
+      Delete(S, i, 1);
+
+  // Автоматично додаємо 'UA' на початку, якщо є дані
+  if (Length(S) > 0) and (Copy(S, 1, 2) <> 'UA') then
+  begin
+    if S[1] = 'A' then
+      S := 'U' + S
+    else if S[1] <> 'U' then
+      S := 'UA' + S;
+  end;
+
+  // Обмежуємо довжину 29 символів
+  if Length(S) > 29 then
+    S := Copy(S, 1, 29);
+
+  if S <> edtIBAN.Text then
+  begin
+    edtIBAN.Text := S;
+    edtIBAN.SelStart := Length(S);
+  end;
+end;
+
+procedure TFmChek.cmbCashlessSubTypeChange(Sender: TObject);
+var
+  SubTypeCode: Integer;
+begin
+  if FUpdatingPaymentType then Exit;
+
+  SubTypeCode := SubTypeIndexToCode(cmbCashlessSubType.ItemIndex);
+  Log('Зміна підтипу оплати: ' + CashlessSubTypeNames[SubTypeCode]);
+
+  UpdatePaymentUIVisibility;
+
+  // Автоматично зберігаємо підтип в БД
+  if not DMMag.QChekKOD.IsNull then
+  begin
+    FDBManager.UpdatePaymentInfo(DMMag.QChekKOD.AsInteger,
+      'CASHLESS',
+      0, // CashAmount — буде оновлено при фіскалізації
+      DMMag.QChekSUMMA.AsFloat, // CardAmount
+      SubTypeCode);
+  end;
 end;
 
 procedure TFmChek.FormKeyDown(Sender: TObject;var Key: Word;Shift: TShiftState);
@@ -646,35 +841,21 @@ var
   CheckID: Integer;
   RetryCount: Integer;
   MaxRetries: Integer;
-  TotalGoodsSum: Integer;
-  TotalPaymentsSum: Integer;
+  TotalGoodsSum, TotalPaymentsSum: Integer;
   i: Integer;
   UserCancelled: Boolean;
   CurrentRetryCount: Integer;
-  // ДОДАНІ ЗМІННІ ДЛЯ ВІЗУАЛІЗАЦІЇ
   LHTMLContent: string;
   LPNGFileName: string;
   LQRCodeFileName: string;
   LTextContent: string;
-  // НОВІ ЗМІННІ ДЛЯ ПЕРЕВІРОК
   TotalFromGoods: Double;
+  CheckSumFromDB: Double;
+  ValidationError: string;
+  JsonString: string;          // для можливого офлайн-збереження (поки не використовується)
+  ReceiptIdAlreadySent: string; // для захисту від дублювання
 begin
-  UpdateAPIStatus(svProcessing);
-  Receipt := nil;
-  ReceiptResponse := nil;
-  UserCancelled := False;
-  // ІНІЦІАЛІЗАЦІЯ НОВИХ ЗМІННИХ
-  LHTMLContent := '';
-  LPNGFileName := '';
-  LQRCodeFileName := '';
-  LTextContent := '';
-
-  // Отримати CheckID перед викликом ValidateAndRepairCheckData
-  CheckID := DMMag.QChekKOD.AsInteger;
-
-  // ВІДНОВЛЕННЯ ДАНИХ ПІСЛЯ АВАРІЙНОГО ЗАВЕРШЕННЯ
-  FDBManager.ValidateAndRepairCheckData(CheckID);
-
+  // Перевірка, чи вже йде фіскалізація
   if FIsProcessingFiscalization then
   begin
     Log('Попередження: фіскалізація вже виконується');
@@ -682,49 +863,67 @@ begin
     Exit;
   end;
 
+  // Валідація полів оплати перед фіскалізацією
+  if not ValidatePaymentFields then
+  begin
+    Log('❌ Валідація полів оплати не пройдена');
+    Exit;
+  end;
+
+  // Зберігаємо поточні значення з UI в БД
+  SavePaymentToDB(DMMag.QChekKOD.AsInteger);
+
+  UpdateAPIStatus(svProcessing);
+  Receipt := nil;
+  ReceiptResponse := nil;
+  UserCancelled := False;
+  LHTMLContent := '';
+  LPNGFileName := '';
+  LQRCodeFileName := '';
+  LTextContent := '';
+  ValidationError := '';
+  ReceiptIdAlreadySent := '';
+
+  CheckID := DMMag.QChekKOD.AsInteger;
+  FDBManager.ValidateAndRepairCheckData(CheckID);
+
   FIsProcessingFiscalization := True;
   btbtnSendReceiptCurl.Enabled := False;
   Screen.Cursor := crHourGlass;
 
   try
-    // ПЕРЕВІРКА СИНХРОНІЗАЦІЇ СУМ ПЕРЕД ФІСКАЛІЗАЦІЄЮ
-    TotalFromGoods := 0.0;
-
-    DMMag.QNData.First;
-    while not DMMag.QNData.EOF do
+    // Перевірка сум
+    CheckSumFromDB := DMMag.QChekSUMMA.AsFloat;
+    if not FDBManager.ValidateCheckSums(CheckID, TotalFromGoods, CheckSumFromDB) then
     begin
-      TotalFromGoods := TotalFromGoods + DMMag.QNDataSUMMA.AsFloat;
-      DMMag.QNData.Next;
-    end;
-
-    // Перевірка, чи сума товарів відповідає сумі в чеку
-    if Abs(TotalFromGoods - DMMag.QChekSUMMA.AsFloat) > 0.01 then
-    begin
-      Log(Format('❌ НЕСПІВПАДІННЯ СУМ: Товари=%.2f, Чек=%.2f', [TotalFromGoods, DMMag.QChekSUMMA.AsFloat]));
       ShowMessage(Format('Неспівпадіння сум:' + sLineBreak +
                         'Сума товарів: %.2f грн' + sLineBreak +
                         'Сума в чеку: %.2f грн' + sLineBreak +
                         'Перевірте коректність даних.',
-                        [TotalFromGoods, DMMag.QChekSUMMA.AsFloat]));
+                        [TotalFromGoods, CheckSumFromDB]));
       Exit;
     end;
 
     if not ValidateAPIState(True, True) then
       Exit;
 
-    if not ValidateCheckForFiscalization then
-      Exit;
-
-    if not DMMag.QChekFISCAL_STATUS.IsNull and
-       (DMMag.QChekFISCAL_STATUS.AsString = 'DONE') then
+    if not FDBManager.ValidateCheckForFiscalizationEx(CheckID, ValidationError) then
     begin
-      if MessageDlg('Чек вже фіскалізований',
-          'Цей чек вже має фіскальний номер: ' + DMMag.QChekFISCAL_CODE.AsString +
-          #13#10'Бажаєте відправити чек повторно?',
-          mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
+      if Pos('вже фіскалізований', ValidationError) > 0 then
       begin
-        UserCancelled := True;
-        Log('Користувач відмовився від повторної фіскалізації чека ' + DMMag.QChekFISCAL_CODE.AsString);
+        if MessageDlg('Чек вже фіскалізований',
+            'Цей чек вже має фіскальний номер: ' + DMMag.QChekFISCAL_CODE.AsString +
+            #13#10'Бажаєте відправити чек повторно?',
+            mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
+        begin
+          UserCancelled := True;
+          Log('Користувач відмовився від повторної фіскалізації чека ' + DMMag.QChekFISCAL_CODE.AsString);
+          Exit;
+        end;
+      end
+      else
+      begin
+        ShowMessage(ValidationError);
         Exit;
       end;
     end;
@@ -741,6 +940,7 @@ begin
       Exit;
     end;
 
+    // Перевірка інтернету
     if not FReceiptAPI.CheckConnectivityCurl(Response) then
     begin
       UpdateAPIStatus(svOffline);
@@ -749,70 +949,27 @@ begin
       Exit;
     end
     else
-    begin
       Log('Зʼєднання з інтернетом перевірено успішно');
-    end;
 
+    // Призначення директорій
     FReceiptAPI.ReceiptsDirectory := receiptspath;
     FReceiptAPI.TempDirectory := temppath;
-
-    // Перевірити та створити директорії
     if not DirectoryExists(FReceiptAPI.ReceiptsDirectory) then
-    begin
       if not ForceDirectories(FReceiptAPI.ReceiptsDirectory) then
       begin
         Log('❌ Не вдалося створити директорію для чеків: ' + FReceiptAPI.ReceiptsDirectory);
+        ShowMessage('Не вдалося створити папку для збереження чеків. Перевірте права доступу.');
         Exit;
       end;
-    end;
-
     if not DirectoryExists(FReceiptAPI.TempDirectory) then
-    begin
       if not ForceDirectories(FReceiptAPI.TempDirectory) then
       begin
         Log('❌ Не вдалося створити тимчасову директорію: ' + FReceiptAPI.TempDirectory);
+        ShowMessage('Не вдалося створити тимчасову папку. Перевірте права доступу.');
         Exit;
       end;
-    end;
 
-    if not DMMag.QChekFISCAL_STATUS.IsNull and
-       (DMMag.QChekFISCAL_STATUS.AsString = 'NON_FISCAL') then
-    begin
-      ShowMessage('Це службовий чек - фіскалізація не виконується');
-      Exit;
-    end;
-
-    if DMMag.QNData.RecordCount = 0 then
-    begin
-      ShowMessage('Чек порожній! Додайте товари перед фіскалізацією.');
-      Exit;
-    end;
-
-    if DMMag.QChekSUMMA.AsFloat <= 0 then
-    begin
-      ShowMessage('Сума чека має бути більше 0!');
-      Exit;
-    end;
-
-    // CheckID вже отримано вище
-
-    // Отримати поточну кількість спроб перед початком фіскалізації
-    CurrentRetryCount := 0;
-    try
-      DMMag.SQLQ.SQL.Text := 'SELECT COALESCE(FISCAL_RETRY_COUNT, 0) AS RETRY_COUNT FROM CHEK WHERE KOD = :CHECK_ID';
-      DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-      DMMag.SQLQ.Open;
-      CurrentRetryCount := DMMag.SQLQ.FieldByName('RETRY_COUNT').AsInteger;
-      DMMag.SQLQ.Close;
-
-      Log('Поточна кількість спроб для чека ' + IntToStr(CheckID) + ': ' + IntToStr(CurrentRetryCount));
-    except
-      on E: Exception do
-      begin
-        Log('Помилка отримання лічильника спроб: ' + E.Message);
-        DMMag.SQLQ.Close;
-      end;
-    end;
+    CurrentRetryCount := FDBManager.GetFiscalRetryCount(CheckID);
 
     try
       Log('=== ПОЧАТОК ФІСКАЛІЗАЦІЇ ЧЕКА ===');
@@ -822,11 +979,7 @@ begin
       Log('ID каси: ' + FReceiptAPI.CurrentCashRegisterId);
       Log('Початкова кількість спроб: ' + IntToStr(CurrentRetryCount));
 
-      Log('=== ПЕРЕВІРКА СТАНУ БД ===');
-      Log('QChek активний: ' + BoolToStr(DMMag.QChek.Active, True));
-      Log('QChek записів: ' + IntToStr(DMMag.QChek.RecordCount));
-      Log('QNData активний: ' + BoolToStr(DMMag.QNData.Active, True));
-      Log('QNData записів: ' + IntToStr(DMMag.QNData.RecordCount));
+      FDBManager.LogDatabaseState;
 
       if not DMMag.QChek.Active or not DMMag.QNData.Active then
       begin
@@ -835,10 +988,10 @@ begin
         Exit;
       end;
 
+      // ---------- СТВОРЕННЯ ОБ'ЄКТА ЧЕКА (НОВА ВЕРСІЯ) ----------
       Receipt := TReceipt.Create;
-      FillMandatoryReceiptFields(Receipt, CheckID);
+      FillMandatoryReceiptFields(Receipt, CheckID);  // використовує оновлені FillGoodsFromDatabase, FillPaymentsFromDatabase
 
-      // ДОДАТКОВА ПЕРЕВІРКА СТРУКТУРИ ЧЕКА
       Log('=== ФІНАЛЬНА ПЕРЕВІРКА СТРУКТУРИ ЧЕКА ===');
       Log('Receipt.TotalSum: ' + IntToStr(Receipt.TotalSum) + ' коп');
       Log('Receipt.TotalPayment: ' + IntToStr(Receipt.TotalPayment) + ' коп');
@@ -847,14 +1000,9 @@ begin
       if Receipt.TotalPayment < Receipt.TotalSum then
       begin
         Log('❌ КРИТИЧНА ПОМИЛКА: TotalPayment < TotalSum!');
-        Log('TotalPayment: ' + IntToStr(Receipt.TotalPayment) + ', TotalSum: ' + IntToStr(Receipt.TotalSum));
-
-        // АВТОМАТИЧНЕ ВИПРАВЛЕННЯ ЗАМІСТЬ АВАРІЙНОГО ЗАВЕРШЕННЯ
         Log('🔄 Спроба автоматичного виправлення сум...');
         Receipt.TotalPayment := Receipt.TotalSum;
         Receipt.Rest := 0;
-
-        // Коректуємо оплати
         if Length(Receipt.Payments) > 0 then
         begin
           Receipt.Payments[0].Value := Receipt.TotalSum;
@@ -867,34 +1015,24 @@ begin
         end;
       end
       else
-      begin
         Log('✅ Структура чека коректна');
-      end;
 
-      Log('=== ПЕРЕВІРКА СУМ ПЕРЕД ВІДПРАВКОЮ ===');
-
+      // Перевірка сум товарів і оплат
       TotalGoodsSum := 0;
       for i := 0 to High(Receipt.Goods) do
-      begin
         if Assigned(Receipt.Goods[i]) then
           TotalGoodsSum := TotalGoodsSum + Receipt.Goods[i].TotalSum;
-      end;
       Log('Сума товарів: ' + FloatToStrF(TotalGoodsSum/100, ffNumber, 10, 2) + ' грн');
 
       TotalPaymentsSum := 0;
       for i := 0 to High(Receipt.Payments) do
-      begin
         if Assigned(Receipt.Payments[i]) then
           TotalPaymentsSum := TotalPaymentsSum + Receipt.Payments[i].Value;
-      end;
       Log('Сума оплат: ' + FloatToStrF(TotalPaymentsSum/100, ffNumber, 10, 2) + ' грн');
 
       if TotalGoodsSum <> TotalPaymentsSum then
       begin
         Log('❌ ПОМИЛКА: Сума товарів ≠ Сумі оплат!');
-        Log('Різниця: ' + FloatToStrF((TotalGoodsSum - TotalPaymentsSum)/100, ffNumber, 10, 2) + ' грн');
-
-        // АВТОМАТИЧНЕ ВИПРАВЛЕННЯ
         if TotalPaymentsSum < TotalGoodsSum then
         begin
           Log('🔄 Автоматично виправляємо оплату...');
@@ -906,76 +1044,69 @@ begin
             Log('✅ Оплату автоматично виправлено');
           end;
         end;
-
-        // Все одно показуємо повідомлення, але не зупиняємо програму
         ShowMessage('Увага: Сума товарів (' + FloatToStrF(TotalGoodsSum/100, ffNumber, 10, 2) +
                    ' грн) не дорівнює сумі оплат (' + FloatToStrF(TotalPaymentsSum/100, ffNumber, 10, 2) + ' грн)' +
                    sLineBreak + 'Спроба автоматичного виправлення...');
       end
       else
-      begin
         Log('✅ Суми збігаються');
-      end;
-      Log('=== КІНЕЦЬ ПЕРЕВІРКИ СУМ ===');
 
-      // Оновити статус на 'SENT' з поточною кількістю спроб
+      // ---------- ФОРМУВАННЯ JSON ДЛЯ МОЖЛИВОГО ОФЛАЙН-ЗБЕРЕЖЕННЯ ----------
+      // (поки не використовується, але зберігаємо змінну для майбутнього)
+      JsonString := '';
+      try
+        with FReceiptAPI.BuildJsonDataCorrected(Receipt) do
+          JsonString := AsJSON;
+      except
+        on E: Exception do
+          Log('⚠️ Не вдалося отримати JSON для офлайн-збереження: ' + E.Message);
+      end;
+
+      // Оновлюємо статус в БД
       FDBManager.UpdateFiscalStatusInDB(CheckID, 'SENT', '', '', '', '', -1, '', '', CurrentRetryCount);
 
+      // ---------- ВІДПРАВКА ЧЕКА З ПОВТОРНИМИ СПРОБАМИ ----------
       MaxRetries := 3;
       RetryCount := CurrentRetryCount;
       Success := False;
+      ReceiptIdAlreadySent := ''; // буде заповнено, якщо сервер створив чек
 
       while RetryCount < MaxRetries do
       begin
         Log(Format('Спроба фіскалізації %d з %d (всього спроб: %d)',
             [RetryCount - CurrentRetryCount + 1, MaxRetries - CurrentRetryCount, RetryCount + 1]));
 
+        // Відправка (використовує оновлений SendReceiptCurl)
         Success := FReceiptAPI.SendReceiptCurl(Receipt, Response, ReceiptResponse);
 
         if Success then
         begin
           Log('✅ Відповідь сервера отримана успішно');
-
-          // Скинути лічильник спроб при успіху, якщо були попередні невдалі спроби
+          if Assigned(ReceiptResponse) then
+            ReceiptIdAlreadySent := ReceiptResponse.Id; // зберігаємо ID для захисту від дублів
           if RetryCount > CurrentRetryCount then
-          begin
-            try
-              DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_RETRY_COUNT = 0 WHERE KOD = :CHECK_ID';
-              DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-              DMMag.SQLQ.ExecSQL;
-              Log('Лічильник спроб скинуто до 0 після успішної фіскалізації');
-            except
-              on E: Exception do
-                Log('Помилка скидання лічильника спроб: ' + E.Message);
-            end;
-          end;
+            FDBManager.ResetFiscalRetryCount(CheckID);
           Break;
         end
         else
         begin
           Log('❌ Помилка спроби ' + IntToStr(RetryCount + 1) + ': ' + Response);
 
-          // СПЕЦІАЛЬНА ОБРОБКА ПОМИЛОК ПОДАТКОВИХ ГРУП
+          // Помилка податкових груп – не повторюємо
           if (Pos('податк', LowerCase(Response)) <> 0) or (Pos('tax', LowerCase(Response)) <> 0) then
           begin
             Log('⚠️ Проблема з податковими групами - потрібне налаштування в кабінеті Checkbox');
             ShowMessage('Помилка податкових груп:' + sLineBreak +
                        'Необхідно налаштувати податкові ставки в кабінеті Checkbox.' + sLineBreak +
                        'Деталі: ' + Copy(Response, 1, 150));
-            // Не робимо подальших спроб для цього типу помилок
             Break;
           end;
 
-          // Перевірити, чи варто робити наступну спробу
-          if not ShouldRetryFiscalization(CheckID, Response, RetryCount) then
+          // Перевіряємо, чи варто повторювати (з урахуванням вже створеного ID)
+          if not ShouldRetryFiscalization(CheckID, Response, RetryCount, ReceiptIdAlreadySent) then
           begin
             Log('⏹️  Подальші спроби припинено за логікою ShouldRetryFiscalization');
             Break;
-          end;
-
-          if Pos('order_id', Response) > 0 then
-          begin
-            Log('⚠️ Проблема з order_id - сервер очікує UUID або порожнє значення');
           end;
 
           if Pos('offline', LowerCase(Response)) > 0 then
@@ -993,27 +1124,16 @@ begin
           end;
 
           Inc(RetryCount);
-
-          // Оновити лічильник спроб в БД після кожної невдалої спроби
           if RetryCount < MaxRetries then
           begin
-            try
-              DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_RETRY_COUNT = :RETRY_COUNT WHERE KOD = :CHECK_ID';
-              DMMag.SQLQ.ParamByName('RETRY_COUNT').AsInteger := RetryCount;
-              DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-              DMMag.SQLQ.ExecSQL;
-              Log('Оновлено лічильник спроб: ' + IntToStr(RetryCount));
-            except
-              on E: Exception do
-                Log('Помилка оновлення лічильника спроб: ' + E.Message);
-            end;
-
+            FDBManager.SetFiscalRetryCount(CheckID, RetryCount);
             Log('🕒 Повторна спроба через 2 секунди...');
             Sleep(2000);
           end;
         end;
       end;
 
+      // ---------- ОБРОБКА РЕЗУЛЬТАТУ ----------
       if Success and Assigned(ReceiptResponse) then
       begin
         Log('✅ Запит чека успішно відправлено!');
@@ -1021,140 +1141,73 @@ begin
         Log('Початковий статус: ' + ReceiptStatusToString(ReceiptResponse.Status));
         Log('Фіскальний номер: ' + ReceiptResponse.FiscalCode);
 
-        // БЕЗПЕЧНЕ ЗБЕРЕЖЕННЯ ДАНИХ У БД
-          try
-            Log('Поточний стан БД перед комітом:');
-            FDBManager.LogDatabaseState;
-            FDBManager.SafeCommitAndReopenConnection;
-            Log('Стан БД після коміту:');
-            FDBManager.LogDatabaseState;
-          except
-            on E: Exception do
-            begin
-              Log('❌ Помилка збереження даних в БД: ' + E.Message);
-              // Не перериваємо процес, але логуємо помилку
-              // Користувач отримав фіскальний чек, навіть якщо збереження в БД не вдалося
-            end;
-          end;
+        try
+          FDBManager.LogDatabaseState;
+          FDBManager.SafeCommitAndReopenConnection;
+          FDBManager.LogDatabaseState;
+        except
+          on E: Exception do
+            Log('❌ Помилка збереження даних в БД: ' + E.Message);
+        end;
 
         HandleSuccessfulFiscalization(CheckID, Receipt, ReceiptResponse);
 
-        // ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ПОСЛЯ ФІСКАЛІЗАЦІЇ
-        Log('=== ПОЧАТОК ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ЧЕКА ===');
-
-        Log('Перевірка директорій:');
-        Log('ReceiptsDirectory: ' + FReceiptAPI.ReceiptsDirectory);
-        Log('TempDirectory: ' + FReceiptAPI.TempDirectory);
-        Log('Directory exists: ' + BoolToStr(DirectoryExists(FReceiptAPI.ReceiptsDirectory), True));
-
-        // 1. Отримуємо PNG зображення
-        Log('Отримання PNG зображення чека...');
+        // Отримання візуалізації
+        Log('=== ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ЧЕКА ===');
         if FReceiptAPI.GetReceiptPNG(ReceiptResponse.Id, LPNGFileName, 30, 58, 75) then
         begin
-          Log('✓ PNG зображення отримано: ' + ExtractFileName(LPNGFileName));
-
-          // ПЕРЕВІРКА ПЕРЕД ПОКАЗОМ
-          Log('Перевірка файлу перед показом:');
-          Log('Повний шлях: ' + LPNGFileName);
-          Log('Файл існує: ' + BoolToStr(FileExists(LPNGFileName), True));
-
+          Log('✓ PNG отримано: ' + ExtractFileName(LPNGFileName));
           if FileExists(LPNGFileName) then
           begin
-            Log('Розмір файлу: ' + IntToStr(FileSize(LPNGFileName)) + ' байт');
             ShowCheck(LPNGFileName);
-          end
-          else
-          begin
-            Log('❌ Файл не знайдено після отримання!');
-            ShowMessage('Файл чеку не знайдено: ' + ExtractFileName(LPNGFileName));
+            if MessageDlg('Чек', 'Надрукувати чек?', mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+              PrintCheckCustom(LPNGFileName, FPrinterName, FPageLeft, FPageTop, FPageWidth, FPageScale);
           end;
         end
         else
-        begin
           Log('✗ Помилка отримання PNG: ' + FReceiptAPI.LastError);
-          ShowMessage('Не вдалося отримати зображення чека: ' + FReceiptAPI.LastError);
-        end;
 
-        // 2. Отримуємо QR-код
-        Log('Отримання QR-коду...');
         if FReceiptAPI.GetReceiptQRCode(ReceiptResponse.Id, LQRCodeFileName) then
-        begin
-          Log('✓ QR-код отримано: ' + ExtractFileName(LQRCodeFileName));
-        end
-        else
-        begin
-          Log('✗ Помилка отримання QR-коду: ' + FReceiptAPI.LastError);
-        end;
-
-        // 3. Отримуємо HTML представлення
-        Log('Отримання HTML представлення...');
+          Log('✓ QR-код отримано');
         if FReceiptAPI.GetReceiptHTML(ReceiptResponse.Id, LHTMLContent) then
-        begin
-          Log('✓ HTML представлення отримано');
           SaveStringToFile(FReceiptAPI.ReceiptsDirectory + '/receipt_' + ReceiptResponse.Id + '.html', LHTMLContent);
-        end
-        else
-        begin
-          Log('✗ Помилка отримання HTML: ' + FReceiptAPI.LastError);
-        end;
-
-        // 4. Отримуємо текстове представлення
-        Log('Отримання текстового представлення...');
         if FReceiptAPI.GetReceiptText(ReceiptResponse.Id, LTextContent) then
-        begin
-          Log('✓ Текстове представлення отримано');
           SaveStringToFile(FReceiptAPI.ReceiptsDirectory + '/receipt_' + ReceiptResponse.Id + '.txt', LTextContent);
-        end
-        else
-        begin
-          Log('✗ Помилка отримання тексту: ' + FReceiptAPI.LastError);
-        end;
 
-        Log('=== ЗАВЕРШЕННЯ ОТРИМАННЯ ВІЗУАЛІЗАЦІЇ ===');
+        Log('=== ЗАВЕРШЕННЯ ВІЗУАЛІЗАЦІЇ ===');
       end
       else
       begin
-        Log('❌ Помилка відправки фіскального чека після ' + IntToStr(RetryCount - CurrentRetryCount + 1) + ' спроб: ' + Response);
-
-        // Оновити лічильник спроб при остаточній помилці
-        try
-          DMMag.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_RETRY_COUNT = :RETRY_COUNT WHERE KOD = :CHECK_ID';
-          DMMag.SQLQ.ParamByName('RETRY_COUNT').AsInteger := RetryCount;
-          DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
-          DMMag.SQLQ.ExecSQL;
-          Log('Фінальний лічильник спроб: ' + IntToStr(RetryCount));
-        except
-          on E: Exception do
-            Log('Помилка оновлення фінального лічильника спроб: ' + E.Message);
-        end;
-
+        Log('❌ Помилка відправки після ' + IntToStr(RetryCount - CurrentRetryCount + 1) + ' спроб: ' + Response);
+        FDBManager.SetFiscalRetryCount(CheckID, RetryCount);
         HandleFailedFiscalization(CheckID, Response);
 
+        // ---------- ТИМЧАСОВО ОФЛАЙН-ЧЕРГА ВІДКЛЮЧЕНА ----------
         if IsNetworkError(Response) then
         begin
           ShowMessage('Помилка мережі після ' + IntToStr(RetryCount - CurrentRetryCount + 1) + ' спроб:' + sLineBreak +
                      'Не вдалося зв''язатися з сервером Checkbox.' + sLineBreak +
-                     'Чек збережено для подальшої обробки.');
-
-          SaveReceiptToOfflineQueue(CheckID);
+                     'Чек НЕ збережено в офлайн-чергу (функціонал тимчасово відключений).');
+          Log('⚠️ Офлайн-збереження відключено. Чек не збережено.');
+          // Коли будете готові впровадити офлайн – розкоментуйте наступний блок:
+          {
+          if MessageDlg('Фіскалізація неможлива', ... , mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+            SaveReceiptToOfflineQueue(CheckID, Receipt, JsonString, Response);
+          }
         end
         else if Pos('validation', LowerCase(Response)) > 0 then
-        begin
           ShowMessage('Помилка валідації даних:' + sLineBreak +
                      'Перевірте коректність даних чека.' + sLineBreak +
-                     Copy(Response, 1, 200));
-        end
+                     Copy(Response, 1, 200))
         else
-        begin
           ShowMessage('Помилка фіскалізації: ' + Copy(Response, 1, 200));
-        end;
       end;
 
     except
       on E: Exception do
       begin
         Log('💥 Виняток при фіскалізації: ' + E.Message);
-        Log('Тип винятку: ' + E.ClassName);
+        Log('Тип: ' + E.ClassName);
         if not UserCancelled then
           HandleFiscalizationException(CheckID, E);
         ShowMessage('Критична помилка: ' + E.Message);
@@ -1165,16 +1218,11 @@ begin
     if not UserCancelled then
     begin
       Log('Очищення ресурсів...');
-      if Assigned(Receipt) then
-        FreeAndNil(Receipt);
-
-      if Assigned(ReceiptResponse) then
-        FreeAndNil(ReceiptResponse);
+      if Assigned(Receipt) then FreeAndNil(Receipt);
+      if Assigned(ReceiptResponse) then FreeAndNil(ReceiptResponse);
     end
     else
-    begin
-      Log('Користувач відмовився від повторної фіскалізації - очищення ресурсів не потрібне');
-    end;
+      Log('Користувач відмовився – очищення не потрібне');
 
     btbtnSendReceiptCurl.Enabled := True;
     Screen.Cursor := crDefault;
@@ -1185,6 +1233,7 @@ begin
   end;
 end;
 
+
 // Для внесення готівки
 procedure TFmChek.btnCashInClick(Sender: TObject);
 var
@@ -1192,10 +1241,11 @@ var
   ReceiptResponse: TReceiptResponse;
   Amount: Integer;
 begin
-  // ЗАМІНА: Одна універсальна перевірка замість декількох
-  if not ValidateAPIState(False, True) then  // RequireCashRegister = True
+  // 1. Перевірка стану API та каси
+  if not ValidateAPIState(False, True) then
     Exit;
 
+  // 2. Отримуємо суму з поля введення
   Amount := GetAmountInKopiyky;
 
   if Amount <= 0 then
@@ -1205,19 +1255,41 @@ begin
     Exit;
   end;
 
-  if FReceiptAPI.CashIncome(Amount, 'Внесення готівки в касу', Response, ReceiptResponse) then
+  // 3. Перевірка — для внесення не потрібно перевіряти баланс
+  //    (готівку завжди можна внести, якщо зміна відкрита)
+
+  // 4. Підтвердження операції
+  if MessageDlg(
+    'Підтвердження внесення готівки',
+    'Ви впевнені, що хочете внести ' + FormatFloat('0.00', Amount / 100) + ' грн в касу?',
+    mtConfirmation, [mbYes, mbNo], 0
+  ) <> mrYes then
+    Exit;
+
+  // 5. Логування операції
+  Log('Операція внесення готівки: ' + FormatFloat('0.00', Amount / 100) + ' грн');
+
+  // 6. Виконуємо операцію
+  if FReceiptAPI.CashIncome(Amount, '', Response, ReceiptResponse) then
   begin
-    ShowMessage('Готівку внесено успішно!' + #13#10 +
-                'ID чека: ' + ReceiptResponse.Id + #13#10 +
-                'Сума: ' + FloatToStrF(Amount/100, ffNumber, 10, 2) + ' грн');
-    fseAmount.Value := 0;
+    // 7. Успіх — оновлюємо баланс
     UpdateBalanceAfterOperation;
+    ShowMessage(
+      'Готівку внесено успішно!' + sLineBreak +
+      sLineBreak +
+      'ID чека: ' + ReceiptResponse.Id + sLineBreak +
+      'Сума: ' + FormatFloat('0.00', Amount / 100) + ' грн' + sLineBreak +
+      'Баланс в касі: ' + FormatFloat('0.00', FCurrentBalance / 100) + ' грн'
+    );
+
+    fseAmount.Value := 0;
   end
   else
   begin
-    ShowMessage('Помилка: ' + Response);
+    ShowMessage('Помилка внесення готівки:' + sLineBreak + Response);
   end;
   UpdateAllStatuses;
+  // 8. Очищення та оновлення UI
   if Assigned(ReceiptResponse) then
     FreeAndNil(ReceiptResponse);
 end;
@@ -1230,10 +1302,11 @@ var
   ReceiptResponse: TReceiptResponse;
   Amount: Integer;
 begin
-  // ЗАМІНА: Одна універсальна перевірка замість декількох
-  if not ValidateAPIState(False, True) then  // RequireCashRegister = True
+  // 1. Перевірка стану API та каси
+  if not ValidateAPIState(False, True) then
     Exit;
 
+  // 2. Отримуємо суму з поля введення
   Amount := GetAmountInKopiyky;
 
   if Amount <= 0 then
@@ -1243,34 +1316,64 @@ begin
     Exit;
   end;
 
+  // 3. Перевірка балансу — використовуємо FCurrentBalance (без API-запиту!)
+  // FCurrentBalance оновлюється при відкритті зміни та після кожної операції
+  if FCurrentBalance <= 0 then
+  begin
+    ShowMessage(
+      'Недостатньо коштів в касі для винесення!' + sLineBreak +
+      sLineBreak +
+      'Поточний баланс: ' + FormatFloat('0.00', FCurrentBalance / 100) + ' грн' + sLineBreak +
+      sLineBreak +
+      'Перевірте, чи відкрита зміна та чи є готівка в касі.'
+    );
+    Exit;
+  end;
+
   if Amount > FCurrentBalance then
   begin
-    ShowMessage('Недостатньо коштів в касі для винесення!' + #13#10 +
-                'Доступно: ' + FloatToStrF(FReceiptAPI.CurrentBalance/100, ffNumber, 10, 2) + ' грн' + #13#10 +
-                'Спроба винесення: ' + FloatToStrF(Amount/100, ffNumber, 10, 2) + ' грн');
+    ShowMessage(
+      'Недостатньо коштів в касі для винесення!' + sLineBreak +
+      sLineBreak +
+      'Доступно: ' + FormatFloat('0.00', FCurrentBalance / 100) + ' грн' + sLineBreak +
+      'Спроба винесення: ' + FormatFloat('0.00', Amount / 100) + ' грн'
+    );
     Exit;
   end;
 
-  if MessageDlg('Підтвердження винесення готівки',
-                'Ви впевнені, що хочете винести ' + FloatToStrF(Amount/100, ffNumber, 10, 2) + ' грн з каси?',
-                mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
-  begin
+  // 4. Підтвердження операції
+  if MessageDlg(
+    'Підтвердження винесення готівки',
+    'Ви впевнені, що хочете винести ' + FormatFloat('0.00', Amount / 100) + ' грн з каси?',
+    mtConfirmation, [mbYes, mbNo], 0
+  ) <> mrYes then
     Exit;
-  end;
 
-  if FReceiptAPI.CashOutcome(Amount, 'Винесення готівки з каси', Response, ReceiptResponse) then
+  // 5. Логування операції (опис НЕ передається в API)
+  Log('Операція винесення готівки: ' + FormatFloat('0.00', Amount / 100) + ' грн');
+
+  // 6. Виконуємо операцію
+  //    Параметр ADescription = '' — API /receipts/service не підтримує description
+  if FReceiptAPI.CashOutcome(Amount, '', Response, ReceiptResponse) then
   begin
-    ShowMessage('Готівку винесено успішно!' + #13#10 +
-                'ID чека: ' + ReceiptResponse.Id + #13#10 +
-                'Сума: ' + FloatToStrF(Amount/100, ffNumber, 10, 2) + ' грн');
-    fseAmount.Value := 0;
+    // 7. Успіх — оновлюємо баланс
     UpdateBalanceAfterOperation;
+    ShowMessage(
+      'Готівку винесено успішно!' + sLineBreak +
+      sLineBreak +
+      'ID чека: ' + ReceiptResponse.Id + sLineBreak +
+      'Сума: ' + FormatFloat('0.00', Amount / 100) + ' грн' + sLineBreak +
+      'Залишок в касі: ' + FormatFloat('0.00', FCurrentBalance / 100) + ' грн'
+    );
+
+    fseAmount.Value := 0;
   end
   else
   begin
-    ShowMessage('Помилка винесення готівки: ' + Response);
+    ShowMessage('Помилка винесення готівки:' + sLineBreak + Response);
   end;
   UpdateAllStatuses;
+  // 8. Очищення та оновлення UI
   if Assigned(ReceiptResponse) then
     FreeAndNil(ReceiptResponse);
 end;
@@ -1278,39 +1381,81 @@ end;
 
 procedure TFmChek.btnCreateCheckClick(Sender: TObject);
 var
-  CheckID,nch: Integer;
+  CheckID: Integer;
+  PaymentType: string;
+  SubType: Integer;
 begin
-  if (FDBManager.CurrentSchet > 0) then
+  if FDBManager.CurrentSchet <= 0 then
   begin
-    CheckID := FDBManager.CreateNewCheck(FDBManager.CurrentSchet, True, 'CASH');
+    MessageDlg('Операція неможлива (рахунок/місце зберігання?)!', mtError, [mbOk], 0);
+    Exit;
+  end;
 
-    if CheckID > 0 then
-    begin
-      DMMag.QChek.Last;
-      //rbCash.Checked := True;
-      Log('✅ Створено та налаштовано новий чек ID: ' + IntToStr(CheckID));
-    end
-    else
-      MessageDlg('Помилка створення чека!', mtError, [mbOk], 0);
+  // Отримуємо поточні налаштування оплати з UI
+  PaymentType := PaymentTypeIndexToStr(cmbPaymentType.ItemIndex);
+  SubType := 0;
+  if PaymentType = 'CASHLESS' then
+    SubType := SubTypeIndexToCode(cmbCashlessSubType.ItemIndex);
+
+  CheckID := FDBManager.CreateNewCheck(
+    FDBManager.CurrentSchet,
+    True,           // IsFiscal
+    PaymentType,
+    SubType,
+    edtIBAN.Text,
+    edtRecipientName.Text,
+    memPaymentPurpose.Text,
+    cmbProvider.Text
+  );
+
+  if CheckID > 0 then
+  begin
+    DMMag.QChek.Last;
+    Log('✅ Створено чек ID: ' + IntToStr(CheckID) +
+        ', тип: ' + PaymentType +
+        ', підтип: ' + IntToStr(SubType));
   end
   else
-    MessageDlg('Операція неможлива (рахунок/місце зберігання?)!', mtError, [mbOk], 0);
-
-  (*FDBManager.SavedChekPos := FDBManager.CreateNewCheck(FDBManager.CurrentSchet);
-    if FDBManager.SavedChekPos > 0 then
-    begin
-      Log('Новий чек ID: ' + IntToStr(FDBManager.SavedChekPos) + ', поточний в QChek: ' + IntToStr(DMMag.QChekKOD.AsInteger));
-      nch := FDBManager.GetNextCheckNumber(FDBManager.CurrentSchet) + 1;  // Якщо +1 робиться тут
-      FDBManager.AssignCheckNumber(FDBManager.SavedChekPos, nch, FDBManager.CurrentSchet);
-    end; *)
+    MessageDlg('Помилка створення чека!', mtError, [mbOk], 0);
 end;
 
+// ===== ВИПРАВЛЕНИЙ BitBtn10Click =====
 procedure TFmChek.BitBtn10Click(Sender: TObject);
 var
-  IsCashPayment: Boolean;
+  CurrentPaymentType: string;
+  CurrentSumma: Double;
 begin
-  IsCashPayment := (DBComboPaymentType.Text = 'CASH');
-  FDBManager.AddProductToCheck(IsCashPayment);
+  // Додаємо товар через менеджер БД
+  FDBManager.AddProductToCheck;
+
+  // Оновлюємо суми оплати в UI та БД після додавання товару
+  if not DMMag.QChekKOD.IsNull then
+  begin
+    CurrentPaymentType := PaymentTypeIndexToStr(cmbPaymentType.ItemIndex);
+    CurrentSumma := DMMag.QChekSUMMA.AsFloat;
+
+    case cmbPaymentType.ItemIndex of
+      0: // Готівка
+        begin
+          FDBManager.UpdatePaymentInfo(DMMag.QChekKOD.AsInteger,
+            'CASH', CurrentSumma, 0, 0);
+          Log('💰 Оновлено CASH_AMOUNT, сума=' + FloatToStrF(CurrentSumma, ffNumber, 10, 2));
+        end;
+      1: // Безготівка
+        begin
+          FDBManager.UpdatePaymentInfo(DMMag.QChekKOD.AsInteger,
+            'CASHLESS', 0, CurrentSumma,
+            SubTypeIndexToCode(cmbCashlessSubType.ItemIndex));
+          Log('💳 Оновлено CARD_AMOUNT, сума=' + FloatToStrF(CurrentSumma, ffNumber, 10, 2));
+        end;
+      2: // Інше
+        begin
+          FDBManager.UpdatePaymentInfo(DMMag.QChekKOD.AsInteger,
+            'OTHER', DMMag.QChekSUMMA.AsFloat, 0, 0);
+          Log('📋 Оновлено тип оплати "Інше", сума=' + FloatToStrF(CurrentSumma, ffNumber, 10, 2));
+        end;
+    end;
+  end;
 end;
 
 procedure TFmChek.btnCheckEraseClick(Sender: TObject);
@@ -1328,25 +1473,15 @@ begin
 end;
 
 procedure TFmChek.BitBtn16Click(Sender: TObject);
-var sk:integer;
 begin
-  if  (not DMMag.QChekKOD.IsNull) and
-      (not DMMag.QNDataKOD.IsNull) and (not DMMag.QNSerKOD.IsNull) then
-  begin
-      FDBManager.SavPos;
-      sk:=DMMag.QNSerKOD.AsInteger;
-      FDBManager.ClsCon;
-      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,'update serijnik set nak_data=null where kod='+inttostr(sk));
-      FDBManager.OpnCon;
-      FDBManager.RstPos;
-  end
-  else MessageDlg('Операція неможлива!',mtError,[mbOk],0);
+  if not FDBManager.ClearSerialNumberAssignment then
+    MessageDlg('Операція неможлива!', mtError, [mbOk], 0);
 end;
 
 procedure TFmChek.btnCheckPrintClick(Sender: TObject);
 begin
   if not DBManagerReady then Exit;
-  if FDBManager.CheckPrinting(pnazva) then
+  if FDBManager.CheckPrinting then
     begin
      frDBDataSet1.DataSource := DMMag.DSNData;
      frDBDataSet1.DataSet := DMMag.QNData;
@@ -1358,7 +1493,7 @@ end;
 
 procedure TFmChek.btnWarrantyClick(Sender: TObject);
 begin
-  // Отримуємо дані через FDBManager, який тепер повертає DMMag.QGar
+  // Отримуємо дани через FDBManager, який тепер повертає DMMag.QGar
   if Assigned(FDBManager.GetWarrantyProducts(
     DMMag.QChekKOD.AsInteger,
     DMMag.QChekSCHET.AsInteger
@@ -1662,54 +1797,8 @@ begin
     btnGetShiftStatusCurl.Click;  // Оновити статус зміни для нової каси
 end;
 
-procedure TFmChek.DBComboPaymentTypeChange(Sender: TObject);
-var
-  NewType: string;
-begin
-  // Виходимо, якщо це автоматична зміна при навігації
-  if not DBComboPaymentType.Focused then Exit;
-  if FUpdatingPaymentType then Exit;
-  FUpdatingPaymentType := True;
-  try
-    NewType := DBComboPaymentType.Text;
-    Log('=== DBComboPaymentTypeChange (користувач змінив) ===');
-    Log('NewType: ' + NewType);
-    if not FDBManager.CanModifyCheck then
-    begin
-      DBComboPaymentType.Text := FDBManager.GetCurrentPaymentType;
-      Exit;
-    end;
-    Log('Обробляємо: ' + NewType);
-    case NewType of
-      'CASH':
-        begin
-          Log('Виклик UpdatePaymentInfoToCash');
-          FDBManager.UpdatePaymentInfoToCash;
-        end;
-      'CARD':
-        begin
-          Log('Виклик UpdatePaymentInfoToCard');
-          FDBManager.UpdatePaymentInfoToCard;
-        end;
-      {'MIXED':
-        begin
-          Log('Виклик UpdatePaymentInfoToMixed');
-          // Якщо немає спеціального методу, використовувати ChangePaymentType з параметрами
-          // Наприклад: запит суми у користувача або розрахунок
-          // Тут припустимо використання загального методу; адаптуйте за потребою
-          ChangePaymentType(FDBManager.CurrentCheckID, 'MIXED',
-            // Приклад: половину готівкою, половину карткою - реалізуйте реальний розрахунок
-            FDBManager.GetCheckTotal(FDBManager.CurrentCheckID) / 2,
-            FDBManager.GetCheckTotal(FDBManager.CurrentCheckID) / 2,
-            'Mixed payment info');
-        end;  }
-    end;
-  finally
-    FUpdatingPaymentType := False;
-  end;
-end;
-
-
+// ===== ВИДАЛЕНО DBComboPaymentTypeChange =====
+// Процедура більше не використовується.
 
 procedure TFmChek.DBGrid1DrawColumnCell(Sender: TObject; const Rect: TRect;
   DataCol: Integer; Column: TColumn; State: TGridDrawState);
@@ -1717,6 +1806,8 @@ var
   BaseBrushColor, BaseFontColor: TColor;
   BaseFontStyle: TFontStyles;
   FiscalStatus: string;
+  PaymentType, PaymentSubTypeStr: string;
+  SubTypeCode: Integer;
 begin
   BaseBrushColor := clWindow;
   BaseFontColor := clWindowText;
@@ -1765,6 +1856,29 @@ begin
     DBGrid1.Canvas.Font.Style := BaseFontStyle;
   end;
 
+  // === НОВЕ: Додаткова інформація в підказці або окремій колонці ===
+  if Column.FieldName = 'PAYMENT_TYPE' then
+  begin
+    PaymentType := DMMag.QChekPAYMENT_TYPE.AsString;
+    if PaymentType = 'CASHLESS' then
+    begin
+      SubTypeCode := DMMag.QChekPAYMENT_SUBTYPE.AsInteger;
+      if (SubTypeCode >= 1) and (SubTypeCode <= 17) then
+        PaymentSubTypeStr := ' (' + CashlessSubTypeNames[SubTypeCode] + ')'
+      else
+        PaymentSubTypeStr := '';
+    end
+    else
+      PaymentSubTypeStr := '';
+
+    // Малюємо текст з підтипом
+    DBGrid1.Canvas.FillRect(Rect);
+    DBGrid1.Canvas.TextOut(Rect.Left + 2, Rect.Top + 2,
+      PaymentType + PaymentSubTypeStr);
+    Exit; // Не викликаємо DefaultDrawColumnCell для цієї колонки
+  end;
+
+
   DBGrid1.Canvas.FillRect(Rect);
   DBGrid1.DefaultDrawColumnCell(Rect, DataCol, Column, State);
 end;
@@ -1792,20 +1906,16 @@ begin
   if (FDBManager.CurrentSchet > 0) then
   begin
     // Використовуємо менеджер БД для створення службового чека
-    CheckID := FDBManager.CreateNewCheck(FDBManager.CurrentSchet, False, 'CASH', 'СЛУЖБОВИЙ ЧЕК');
+    CheckID := FDBManager.CreateNewCheck(FDBManager.CurrentSchet, False, 'CASH', 0, 'СЛУЖБОВИЙ ЧЕК');
 
     if CheckID > 0 then
     begin
-      // Оновити інтерфейс
       DMMag.QChek.Last;
-
       Log('✅ Службовий чек створено ID: ' + IntToStr(CheckID));
       ShowMessage('Службовий чек створено - фіскалізація не виконуватиметься');
     end
     else
-    begin
       MessageDlg('Помилка створення службового чека!', mtError, [mbOk], 0);
-    end;
   end
   else
     MessageDlg('Операція неможлива (рахунок/місце зберігання?)!', mtError, [mbOk], 0);
@@ -2201,160 +2311,88 @@ end;
 procedure TFmChek.btnOpenShiftClick(Sender: TObject);
 var
   Response: string;
-  Success: Boolean;
-  ACashRegisterStatus: TCashRegisterStatus;
+  ShiftStatus: TShiftStatus;
+  CRStatus: TCashRegisterStatus;
 begin
-  // Загальна перевірка стану API
-  if not ValidateAPIState(False, True) then  // RequireCashRegister = True
+  // Загальна перевірка стану API (без вимоги до каси)
+  if not ValidateAPIState(False, True) then
     Exit;
 
-  // Оновлюємо статус - початок операції
   UpdateShiftStatus(svProcessing);
   btnOpenShift.Enabled := False;
   Screen.Cursor := crHourGlass;
-  ACashRegisterStatus := nil;
+  ShiftStatus := nil;
+  CRStatus := nil;
 
   try
     try
-      // КРОК 1: Перехід в офлайн-режим
-      Log('=== КРОК 1: Перехід каси в офлайн-режим ===');
-      Success := FReceiptAPI.GoOfflineCurl(Response);
-
-      if not Success then
+      // Викликаємо універсальний метод відкриття зміни.
+      // Він сам визначить режим (онлайн/офлайн) та необхідність go-offline.
+      if FReceiptAPI.OpenShiftCurl('', '', '', Response, ShiftStatus) then
       begin
-        Log('❌ Помилка переходу в офлайн режим: ' + Response);
-        UpdateCashRegisterStatus(svError);
-        if Pos('"message":"', Response) > 0 then
-          Log('Сервер повернув помилку: ' + Response)
-        else if Pos('Not Found', Response) > 0 then
-          Log('Касу не знайдено. Перевірте ID каси.')
-        else if Pos('Unauthorized', Response) > 0 then
-          Log('Помилка авторизації. Токен недійсний.');
-
-        ShowMessage('Помилка переходу в офлайн режим: ' + Copy(Response, 1, 200));
-        Exit;
-      end;
-
-      Log('✅ Касу успішно переведено в офлайн режим!');
-      // Невелика затримка для стабілізації
-      Sleep(1000);
-
-      // КРОК 2: Перевірка стану каси після переходу в офлайн
-      Log('=== КРОК 2: Перевірка стану каси ===');
-      if not FReceiptAPI.GetCashRegisterStatusCurl(FReceiptAPI.CurrentCashRegisterId, Response, ACashRegisterStatus) then
-      begin
-        Log('❌ Не вдалося отримати статус каси після переходу в офлайн');
-        UpdateCashRegisterStatus(svError);
-        ShowMessage('Не вдалося перевірити стан каси після переходу в офлайн');
-        Exit;
-      end;
-
-      try
-        if Assigned(ACashRegisterStatus) then
+        // ✅ Успішне відкриття зміни
+        if Assigned(ShiftStatus) and (ShiftStatus.Status = 'OPENED') then
         begin
-          Log('Статус каси після переходу в офлайн:');
-          Log(' - OfflineMode: ' + BoolToStr(ACashRegisterStatus.OfflineMode, True));
-          Log(' - StayOffline: ' + BoolToStr(ACashRegisterStatus.StayOffline, True));
-          Log(' - ShiftStatus: ' + ACashRegisterStatus.ShiftStatus);
-
-          // Перевірка, чи каса дійсно в офлайн-режимі
-          if not ACashRegisterStatus.OfflineMode then
-          begin
-            Log('❌ Каса не перейшла в офлайн-режим');
-            UpdateCashRegisterStatus(svError);
-            ShowMessage('Каса не перейшла в офлайн-режим. Спробуйте ще раз.');
-            Exit;
-          end;
-
-          // Перевірка статусу зміни
-          if ACashRegisterStatus.ShiftStatus = 'OPENED' then
-          begin
-            UpdateShiftStatus(svOpened);
-            Log('ℹ️ Зміна вже відкрита!');
-            FReceiptAPI.CurrentShiftId := FReceiptAPI.GetCurrentShiftIdCurl(Response);
-            if FReceiptAPI.CurrentShiftId <> '' then
-            begin
-              edtShiftId.Text := FReceiptAPI.CurrentShiftId;
-              ShowMessage('Зміна вже відкрита! Використовується поточна зміна: ' + FReceiptAPI.CurrentShiftId);
-              Exit; // Зміна вже відкрита - виходимо
-            end;
-          end;
-        end;
-      finally
-        FreeAndNil(ACashRegisterStatus);
-      end;
-
-      Log('✅ Статус каси перевірено - готова до відкриття зміни');
-      UpdateCashRegisterStatus(svReady);
-
-      // Невелика затримка перед відкриттям зміни
-      Sleep(1000);
-
-      // КРОК 3: Відкриття зміни в офлайн-режимі
-      Log('=== КРОК 3: Відкриття зміни в офлайн-режимі ===');
-      // Викликаємо оригінальний метод відкриття зміни
-      btnOpenShiftCurlClick(Sender);
-
-      // Перевіряємо, чи зміна успішно відкрита
-      if FReceiptAPI.CurrentShiftId <> '' then
-      begin
-        UpdateShiftStatus(svOpened);
-        Log('✅ Автоматичне відкриття зміни завершено успішно!');
-
-        // Автоматичний перехід назад в онлайн (опціонально)
-        Log('=== Автоматичний перехід в онлайн режим ===');
-        Success := FReceiptAPI.GoOnlineCurl(Response);
-        if Success and (Pos('"status":"ok"', Response) > 0) then
-        begin
-          Log('✅ Касу автоматично переведено назад в онлайн режим!');
-          UpdateCashRegisterStatus(svOnline);
+          UpdateShiftStatus(svOpened);
+          edtShiftId.Text := FReceiptAPI.CurrentShiftId;
+          ShowMessage('✅ Зміну успішно відкрито!');
         end
         else
         begin
-          Log('⚠️ Не вдалося автоматично перевести касу в онлайн режим: ' + Response);
-          UpdateCashRegisterStatus(svReady, 'Офлайн');
-          ShowMessage('Зміну успішно відкрито!' + sLineBreak +
-                     'Для фіскалізації чеків переведіть касу в онлайн режим.');
+          // ⚠️ API повернув True, але статус не OPENED
+          if Assigned(ShiftStatus) then
+            Log('❌ Статус зміни: ' + ShiftStatus.Status)
+          else
+            Log('❌ ShiftStatus не повернуто, хоча OpenShiftCurl повернув True');
+
+          UpdateShiftStatus(svError);
+          ShowMessage('❌ Помилка: зміна не відкрита. Статус: ' +
+            IfThen(Assigned(ShiftStatus), ShiftStatus.Status, 'не визначено'));
         end;
       end
       else
       begin
-        Log('❌ Не вдалося відкрити зміну');
+        // ❌ Помилка виконання OpenShiftCurl
         UpdateShiftStatus(svError);
+        ShowMessage('❌ Помилка відкриття зміни:' + sLineBreak + Copy(Response, 1, 300));
       end;
-
     except
       on E: Exception do
       begin
-        Log('❌ Виняток при автоматичному відкритті зміни: ' + E.Message);
-        Log('Тип помилки: ' + E.ClassName);
+        Log('❌ Виняток у btnOpenShiftClick: ' + E.Message);
         UpdateShiftStatus(svError);
-        UpdateCashRegisterStatus(svError);
-        ShowMessage('Виникла помилка при відкритті зміни: ' + E.Message);
+        ShowMessage('Критична помилка: ' + E.Message);
       end;
     end;
   finally
     btnOpenShift.Enabled := True;
     Screen.Cursor := crDefault;
 
-    // Оновлюємо статус каси через пряме оновлення, а не клік по кнопці
-    if Assigned(FReceiptAPI) and (FReceiptAPI.CurrentCashRegisterId <> '') then
+    // 🔄 Оновлюємо статус каси для відображення в UI (прямий виклик API)
+    if FReceiptAPI.CurrentCashRegisterId <> '' then
     begin
-      if FReceiptAPI.GetCashRegisterStatusCurl(FReceiptAPI.CurrentCashRegisterId, Response, ACashRegisterStatus) then
+      if FReceiptAPI.GetCashRegisterStatusCurl(FReceiptAPI.CurrentCashRegisterId, Response, CRStatus) then
       begin
         try
-          if Assigned(ACashRegisterStatus) then
+          if Assigned(CRStatus) then
           begin
-            if ACashRegisterStatus.Active then
-              UpdateCashRegisterStatus(svOnline, ACashRegisterStatus.Number)
-            else
-              UpdateCashRegisterStatus(svError);
+            // Тут оновіть свої UI-поля, наприклад:
+            // lblCashRegisterStatus.Caption := 'Статус: ' + IfThen(CRStatus.OfflineMode, 'Офлайн', 'Онлайн');
+            // lblShiftStatus.Caption := 'Зміна: ' + CRStatus.ShiftStatus;
+            Log('Статус каси оновлено: OfflineMode=' + BoolToStr(CRStatus.OfflineMode, True));
           end;
         finally
-          FreeAndNil(ACashRegisterStatus);
+          if Assigned(CRStatus) then
+            FreeAndNil(CRStatus);
         end;
-      end;
+      end
+      else
+        Log('⚠️ Не вдалося оновити статус каси: ' + Copy(Response, 1, 100));
     end;
+
+    // Звільнення пам'яті
+    if Assigned(ShiftStatus) then
+      FreeAndNil(ShiftStatus);
   end;
 end;
 
@@ -3157,6 +3195,11 @@ begin
       begin
         Log('✅ PNG звіт отримано: ' + ExtractFileName(LPngFileName));
         ShowCheck(LPngFileName);
+        if MessageDlg('Х-звіт', 'Надрукувати Х-звіт?',mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+        begin
+          PrintCheckCustom(LPNGFileName,FPrinterName, FPageLeft, FPageTop, FPageWidth, FPageScale);
+          Log('Х-звіт надіслано на друк');
+        end;
         // Тут можна додати відображення зображення в інтерфейсі
         // Image1.Picture.LoadFromFile(LPngFileName);
       end
@@ -3637,368 +3680,164 @@ begin
   end;
 end;
 
+procedure TFmChek.LoadSettingsFromINI;
+var
+    dateFolder, targetFolder: string;
+begin
+
+   // 0.1. Читання всіх INI-налаштувань
+   IniPropStorage1.IniFileName := ExtractFilePath(ParamStr(0))+'magazin.ini';
+   IniPropStorage1.IniSection:='PATH';
+   reppath:=IniPropStorage1.ReadString('ReportPath','');
+   logpath:=IniPropStorage1.ReadString('LogPath','');
+   temppath:=IniPropStorage1.ReadString('TempPath','');
+   receiptspath := IniPropStorage1.ReadString('ReceiptsPath','');
+   // Створюємо підпапку за поточною датою
+   dateFolder := FormatDateTime('YYYY-MM-DD', Now);
+   targetFolder := IncludeTrailingPathDelimiter(receiptspath) + dateFolder;
+   // Завжди намагаємося створити папку (якщо вже існує - нічого не станеться)
+   if ForceDirectories(targetFolder) then
+   begin
+     receiptspath := targetFolder;
+     Log('✅ Використовується папка за датою: ' + targetFolder);
+   end
+   else
+   begin
+     Log('❌ Не вдалося створити/використати папку за датою: ' + targetFolder);
+     Log('ℹ️ Використовується кореневий шлях: ' + receiptspath);
+     // receiptspath залишається кореневим
+   end;
+   IniPropStorage1.IniSection:='SECURE';
+   level:=IniPropStorage1.ReadInteger('Level',0)=1;
+   IniPropStorage1.IniSection:='OPTIONS';
+   fmndata.DateEdit1.ReadOnly:=IniPropStorage1.ReadInteger('EditDate',0)=0;
+   DMMag.pereschcen:=IniPropStorage1.ReadInteger('Pereschetcen',0)=1;
+   if IniPropStorage1.ReadInteger('CreateChkBoxLogs',0)=1 then createlogs:=true else createlogs:=false;
+   // ✅ ІНІЦІАЛІЗАЦІЯ ЛОГ-ФАЙЛУ (якщо логування активовано)
+   if createlogs then  InitializeLogFile;
+
+   FTempCurrentKlient:=IniPropStorage1.ReadInteger('CheckStore',0);
+
+   IniPropStorage1.IniSection:='CHECKBOX';
+
+   // Зберігаємо попереднє значення
+   FPreviousUseCheckboxAPI := UseCheckboxAPI;
+   UseCheckboxAPI:=IniPropStorage1.ReadInteger('UseCheckboxAPI',0)=1;
+   GoodsTaxGroup:=IniPropStorage1.ReadInteger('GoodsTaxGroup',8);
+   edtUsername.Text:=IniPropStorage1.ReadString('Username','test_cwmtmpukq');
+   edtPassword.Text:=IniPropStorage1.ReadString('Password','test_cwmtmpukq');
+   edtClientName.Text:=IniPropStorage1.ReadString('ClientName','Магазинчик');
+   edtClientVersion.Text:=IniPropStorage1.ReadString('ClientVersion','1.0.0.1123');
+   edtBaseURL.Text:=IniPropStorage1.ReadString('BaseURL','https://api.checkbox.ua');
+   edtLicenseKey.Text:=IniPropStorage1.ReadString('LicenseKey','test91a62701a16859b94c3419fe');
+   edtFiscalCode.Text:=IniPropStorage1.ReadString('FiscalCode','');
+   edtCashRegisterId.Text:=IniPropStorage1.ReadString('CashRegisterId','');
+   edtPinCode.Text:=IniPropStorage1.ReadString('Pin','');
+   Pinlogin := IniPropStorage1.ReadInteger('PinLogin', 0)=1;
+   if not PinLogin then
+     rbPassword.Checked := True
+   else
+     rbPinCode.Checked := True;
+   FCashierNameFromIni := IniPropStorage1.ReadString('CashierName', 'Тестовий касир');
+   FDepartamentFromIni := IniPropStorage1.ReadString('Departament', 'Тестовий відділ');
+
+   //налаштування принтера
+   IniPropStorage1.IniSection:='PRINTER';
+   FPrinterName := IniPropStorage1.ReadString('PrinterName', 'HP_Laser_jet_Professional_M1132_MFP_2');
+   FPageLeft := IniPropStorage1.ReadInteger('PageLeft', 0);
+   FPageTop := IniPropStorage1.ReadInteger('PageTop', 0);
+   FPageWidth := IniPropStorage1.ReadInteger('PageWidth', 60);
+   FPageScale := IniPropStorage1.ReadInteger('PageScale', 100);
+   Log('Налаштування принтера завантажено:');
+   Log(Format('Принтер: %s, Left: %d, Top: %d, Width: %d, Scale: %d',
+     [FPrinterName, FPageLeft, FPageTop, FPageWidth, FPageScale]));
+end;
+
 procedure TFmChek.FormShow(Sender: TObject);
 var
-  nsch, rkv, vr,i: integer;
-  Response: string;
-  ShiftStatus: TShiftStatus;
-  CashRegisterStatus: TCashRegisterStatus;
-  ShiftId: string;
-  CashRegisterId: string;
-  PreviousUseCheckboxAPI: Boolean;
-  AuthSuccess: Boolean;
-  AuthResponse: string;
-  TempCurrentKlient,TempCurrentSchet:integer;
+  i: integer;
 begin
-  DMMag.readconf;
-  IniPropStorage1.IniFileName := ExtractFilePath(ParamStr(0))+'magazin.ini';
-  IniPropStorage1.IniSection:='PATH';
-  reppath:=IniPropStorage1.ReadString('ReportPath','');
-  logpath:=IniPropStorage1.ReadString('LogPath','');
-  temppath:=IniPropStorage1.ReadString('TempPath','');
-  receiptspath:=IniPropStorage1.ReadString('ReceiptsPath','');
-  IniPropStorage1.IniSection:='SECURE';
-  level:=IniPropStorage1.ReadInteger('Level',0)=1;
-  IniPropStorage1.IniSection:='OPTIONS';
-  fmndata.DateEdit1.ReadOnly:=IniPropStorage1.ReadInteger('EditDate',0)=0;
-  DMMag.pereschcen:=IniPropStorage1.ReadInteger('Pereschetcen',0)=1;
-  if IniPropStorage1.ReadInteger('CreateChkBoxLogs',0)=1 then createlogs:=true else createlogs:=false;
-  // ✅ ІНІЦІАЛІЗАЦІЯ ЛОГ-ФАЙЛУ (якщо логування активовано)
-  if createlogs then  InitializeLogFile;
+  LoadSettingsFromINI;
 
-  TempCurrentKlient:=IniPropStorage1.ReadInteger('CheckStore',0);
-  if TempCurrentKlient>0 then
+  FCurrentBalance := -1;
+  fseAmount.Value := 0;
+
+  // Ініціалізація БД
+  if Assigned(FDBManager) then FreeAndNil(FDBManager);
+  FDBManager := TChekDBManager.Create(DMMag, @Self.Log);
+
+  if not FDBManager.AfterCreate(FTempCurrentKlient) then
   begin
-    label1.Caption:=DMMag.ZaprosString('NAZVA','select nazva from klient where kod='+inttostr(TempCurrentKlient));
-    DMMag.QKl.SQL.Clear;
-    DMMag.QKl.SQL.Add('select * from klient where kod='+inttostr(TempCurrentKlient));
-  end
-  else label4.Caption:='Не задано місце зберігання чеків (налаштування)!';
-
-  IniPropStorage1.IniSection:='CHECKBOX';
-
-  // Зберігаємо попереднє значення
-  PreviousUseCheckboxAPI := UseCheckboxAPI;
-  UseCheckboxAPI:=IniPropStorage1.ReadInteger('UseCheckboxAPI',0)=1;
-  GoodsTaxGroup:=IniPropStorage1.ReadInteger('GoodsTaxGroup',3);
-  edtUsername.Text:=IniPropStorage1.ReadString('Username','test_cwmtmpukq');
-  edtPassword.Text:=IniPropStorage1.ReadString('Password','test_cwmtmpukq');
-  edtClientName.Text:=IniPropStorage1.ReadString('ClientName','Магазинчик');
-  edtClientVersion.Text:=IniPropStorage1.ReadString('ClientVersion','1.0.0.1123');
-  edtBaseURL.Text:=IniPropStorage1.ReadString('BaseURL','https://api.checkbox.ua');
-  edtLicenseKey.Text:=IniPropStorage1.ReadString('LicenseKey','test91a62701a16859b94c3419fe');
-  edtFiscalCode.Text:=IniPropStorage1.ReadString('FiscalCode','');
-  edtCashRegisterId.Text:=IniPropStorage1.ReadString('CashRegisterId','');
-  edtPinCode.Text:=IniPropStorage1.ReadString('Pin','');
-  //rbPassword.Checked := IniPropStorage1.ReadInteger('PinLogin', 0) = 0;
-  Pinlogin := IniPropStorage1.ReadInteger('PinLogin', 0)=1;
-  if not PinLogin then
-    rbPassword.Checked := True
-  else
-    rbPinCode.Checked := True;
-  FCashierNameFromIni := IniPropStorage1.ReadString('CashierName', 'Тестовий касир');
-  FDepartamentFromIni := IniPropStorage1.ReadString('Departament', 'Тестовий відділ');
-
-  FCurrentBalance := -1; // Початкове недійсне значення
-  fseAmount.Value:=0;
-  {-----------------------}
-  TempCurrentSchet:=0;
-  DMMag.TrMag.StartTransaction;
-  DMMag.SQLQ.SQL.Clear;
-  DMMag.SQLQ.SQL.Add('select kod from schet where klient='+inttostr(TempCurrentKlient)+' and data_vv='+#39+FormatDateTime('dd.mm.yyyy',Date)+#39);
-  DMMag.SQLQ.Active:=true;
-  if DMMag.SQLQ.FieldByName('KOD').IsNull then
-  begin
-    DMMag.SQLQ.Active:=false;
-    DMMag.TrMag.Commit;
-    if (TempCurrentKlient>0) then
-    begin
-      vr:=DMMag.Zapros('VID_RAS','select VID_RAS from klient where kod='+inttostr(TempCurrentKlient));
-      nsch:=DMMag.Zapros('max','select max(nomer) from schet')+1;
-      rkv:=DMMag.Zapros('rekvizit','select rekvizit from klient where kod='+inttostr(TempCurrentKlient));
-      DMMag.LaunchQuery(DMMag.SQLQ,DMMag.TrMag,
-         'insert into schet(klient,data_vv,nomer,rekvizit,vid_ras,nazva,sch_summa,nak_summa,nak_summa_prih,nak_fin_rez,priznak,kr_prizn) '+
-          'values('+inttostr(TempCurrentKlient)+','+
-          #39+FormatDateTime('dd.mm.yyyy',Date)+#39+','+
-          inttostr(nsch)+','+
-          inttostr(rkv)+','+
-          inttostr(vr)+','+
-          #39+Label1.Caption+#39+','+
-          '0,0,0,0,0,0)');
-      DMMag.TrMag.StartTransaction;
-      DMMag.SQLQ.SQL.Clear;
-      DMMag.SQLQ.SQL.Add('select kod from schet where klient='+inttostr(TempCurrentKlient)+' and data_vv='+#39+FormatDateTime('dd.mm.yyyy',Date)+#39);
-      DMMag.SQLQ.Active:=true;
-    end
-    else messagedlg('Операція неможлива(клієнт?) !',mtError,[mbOk],0);
-  end;
-  TempCurrentSchet:=DMMag.SQLQ.FieldByName('KOD').AsInteger;
-  DMMag.SQLQ.Active:=false;
-
-  {============}
-  DMMag.SQLQ.SQL.Clear;
-  DMMag.SQLQ.SQL.Add('select s.nomer,s.data_vv,p.nal_kod as nal_kod,p.svid as psvid,p.nazva as pnazva,p.nazshort as pnazshort');
-  DMMag.SQLQ.SQL.Add('from schet s,rekvizit r,prodavec p');
-  DMMag.SQLQ.SQL.Add('where s.kod='+inttostr(TempCurrentSchet));
-  DMMag.SQLQ.SQL.Add('and s.rekvizit=r.kod and r.prodavec=p.kod');
-  DMMag.SQLQ.Active:=true;
-
-  if DMMag.SQLQ.FieldByName('nomer').IsNull then nomer:= ''
-  else nomer:= DMMag.SQLQ.FieldByName('nomer').asstring;
-
-  if DMMag.SQLQ.FieldByName('data_vv').IsNull then datavv:= '"____"________________________20____р.'
-  else datavv:= DecDate(DMMag.SQLQ.FieldByName('data_vv').AsDateTime);
-
-  if DMMag.SQLQ.FieldByName('nal_kod').IsNull then nalkod:= ''
-  else nalkod:=DMMag.SQLQ.FieldByName('nal_kod').AsString;
-
-  if DMMag.SQLQ.FieldByName('psvid').IsNull then psvid:= ''
-  else psvid:=DMMag.SQLQ.FieldByName('psvid').AsString;
-
-  if DMMag.SQLQ.FieldByName('pnazva').IsNull then pnazva:= ''
-  else pnazva:=DMMag.SQLQ.FieldByName('pnazva').AsString;
-
-  if DMMag.SQLQ.FieldByName('pnazshort').IsNull then pnazshort:= ''
-  else pnazshort:=DMMag.SQLQ.FieldByName('pnazshort').AsString;
-
-  DMMag.SQLQ.Active:=false;
-  {===========}
-
-  DMMag.TrMag.Commit;
-
-  // ІНІЦІАЛІЗАЦІЯ МЕНЕДЖЕРА БД ПІСЛЯ ОТРИМАННЯ SCHET
-  if Assigned(FDBManager) then
     FreeAndNil(FDBManager);
-  FDBManager := TChekDBManager.Create(DMMag, @Self.Log, TempCurrentSchet);
-  FDBManager.CurrentSchet:= TempCurrentSchet;
-  FDBManager.CurrentKlient:= TempCurrentKlient;
+    if FTempCurrentKlient <= 0
+      then label4.Caption := 'Не задано місце зберігання чеків (налаштування)!'
+      else label4.Caption := 'Помилка ініціалізації рахунку';
+    Exit;
+  end;
 
-  Log('✅ Менеджер БД ініціалізовано з schet=' + IntToStr(FDBManager.CurrentSchet));
+  label1.Caption := FDBManager.knazva;
 
-  DMMag.QChek.SQL.Clear;
-  DMMag.QChek.SQL.Add('select * from chek where schet='+inttostr(FDBManager.CurrentSchet)+' order by kod');
-  {-------------------------------}
+   // === МІГРАЦІЯ: конвертація старих типів оплати ===
+  // Виконується один раз при старті або при навігації на старий чек
+  // Логіка вже є в chekdb.pas: ConvertOldPaymentType
 
-  DMMag.schb1:=true;
-  DMMag.schb3:=false;
-  DmMag.frk:=0;
-  DmMag.ssort:=2;
+    // === НОВЕ: Ініціалізація компонентів оплати ===
+    // Заповнюємо cmbPaymentType
+    cmbPaymentType.Items.Clear;
+    cmbPaymentType.Items.Add('Готівка');
+    cmbPaymentType.Items.Add('Безготівка');
+    cmbPaymentType.Items.Add('Інше');
 
-  FDBManager.OpnCon;
-  DMMag.QChek.Last;
+    // Заповнюємо cmbCashlessSubType з констант chekdb
+    cmbCashlessSubType.Items.Clear;
+    for i := 1 to 17 do
+      cmbCashlessSubType.Items.Add(CashlessSubTypeNames[i]);
 
-  // 2. Ініціалізація логу
+    // Заповнюємо cmbProvider
+    cmbProvider.Items.Clear;
+    for i := 0 to High(CardProviders) do
+      cmbProvider.Items.Add(CardProviders[i]);
+
+    // Прив'язуємо обробники
+    cmbPaymentType.OnChange := @cmbPaymentTypeChange;
+    cmbCashlessSubType.OnChange := @cmbCashlessSubTypeChange;
+
+    // Завантажуємо поточний платіж
+    if not DMMag.QChek.IsEmpty then
+      LoadPaymentToUI(DMMag.QChekKOD.AsInteger);
+
+  // Ініціалізація UI
   memLog.Lines.Clear;
   Log('Застосунок ініціалізовано');
   chkUseCheckboxAPI.Checked := UseCheckboxAPI;
   ChangeCheckboxAPIFunctionality(UseCheckboxAPI);
 
-  // === НОВИЙ КОД: ІНІЦІАЛІЗАЦІЯ КАСИ ===
+  // === Checkbox API ===
   if UseCheckboxAPI then
-  begin
-    // ОНОВЛЮЄМО СТАТУСИ НА ПОЧАТКУ ІНІЦІАЛІЗАЦІЇ
-    UpdateAPIStatus(svProcessing, 'Ініціалізація...');
-    UpdateCashierStatus(svUnknown);
-    UpdateCashRegisterStatus(svUnknown);
-    UpdateShiftStatus(svUnknown);
+    InitializeCheckboxAPI;  // ← один виклик
 
-    Log('Перевірка стану Checkbox API...');
-
-    // ⭐⭐ СПРОЩЕНА ПЕРЕВІРКА: використовуємо нашу нову функцію ⭐⭐
-    if ValidateAPIState(False, False) then  // Basic check only
-    begin
-      Log('API успішно ініціалізовано та авторизовано');
-
-      // ОНОВЛЮЄМО СТАТУС API
-      UpdateAPIStatus(svOnline);
-
-      // Оновити інформацію про касира
-      UpdateCashierInfo;
-
-      // Завантажуємо налаштування каси
-      LoadCashRegisterPreferences;
-
-      // Автоматична ініціалізація каси, якщо потрібно
-      if FReceiptAPI.CurrentCashRegisterId = '' then
-      begin
-        Log('Спроба автоматичного вибору оптимальної каси...');
-        // ОНОВЛЮЄМО СТАТУС КАСИ
-        UpdateCashRegisterStatus(svProcessing, 'Автоматичний вибір...');
-
-        if InitializeOptimalCashRegister(Response) then
-        begin
-          Log('Касу автоматично обрано: ' + Copy(FReceiptAPI.CurrentCashRegisterId, 1, 8) + '...');
-          SaveCashRegisterPreferences;
-
-          // Оновлюємо список кас для відображення
-          RefreshCashRegisterList;
-        end
-        else
-        begin
-          Log('Не вдалося автоматично обрати касу: ' + Response);
-          // ОНОВЛЮЄМО СТАТУС КАСИ ПРИ ПОМИЛЦІ
-          UpdateCashRegisterStatus(svError, 'Не вдалося обрати');
-
-          // Пропонуємо користувачу вибрати вручну
-          RefreshCashRegisterList;
-
-          if Length(FCashRegisters) > 0 then
-          begin
-            ShowMessage('Не вдалося автоматично обрати касу.' + sLineBreak +
-                       'Будь ласка, виберіть касу вручну зі списку.');
-          end
-          else
-          begin
-            ShowMessage('Не вдалося отримати список кас. Перевірте зʼєднання.');
-          end;
-        end;
-      end
-      else
-      begin
-        Log('Використовуємо збережену касу: ' + Copy(FReceiptAPI.CurrentCashRegisterId, 1, 8) + '...');
-        // ОНОВЛЮЄМО СТАТУС КАСИ
-        UpdateCashRegisterStatus(svReady, 'Збережена каса');
-
-        // Оновлюємо список кас та відображення
-        RefreshCashRegisterList;
-
-        // Знаходимо та відображаємо інформацію про поточну касу
-        if Length(FCashRegisters) > 0 then
-        begin
-          for i := 0 to High(FCashRegisters) do
-          begin
-            if FCashRegisters[i].Id = FReceiptAPI.CurrentCashRegisterId then
-            begin
-              Break;
-            end;
-          end;
-        end;
-      end;
-
-      // Перевіряємо чи встановлено ID каси
-      if FReceiptAPI.CurrentCashRegisterId = '' then
-      begin
-        Log('⚠️ УВАГА: ID каси не встановлено! Операції з готівкою будуть неможливі.');
-        UpdateCashRegisterStatus(svError, 'ID не встановлено');
-      end
-      else
-      begin
-        Log('✅ ID каси встановлено: ' + Copy(FReceiptAPI.CurrentCashRegisterId, 1, 8) + '...');
-      end;
-    end
-    else
-    begin
-      Log('❌ Не вдалося ініціалізувати API або авторизуватися');
-      UpdateAPIStatus(svError, 'Помилка ініціалізації');
-      UpdateCashierStatus(svError, 'Помилка авторизації');
-    end;
-
-    // 6. Перевірка наявності файлу стану зміни
-    ShiftId := FReceiptAPI.LoadShiftFromFile;
-    if ShiftId <> '' then
-    begin
-      Log('Знайдено збережену зміну: ' + Copy(ShiftId, 1, 8) + '...');
-      // ОНОВЛЮЄМО СТАТУС ЗМІНИ
-      UpdateShiftStatus(svProcessing, 'Перевірка...');
-
-        // Спроба перевірити статус зміни на сервері
-        if FReceiptAPI.GetShiftStatusCurl(ShiftId, AuthResponse, ShiftStatus) and
-           Assigned(ShiftStatus) then
-        begin
-          try
-            if ShiftStatus.Status = 'OPENED' then
-            begin
-              // Успішне відновлення
-              SynchronizeShiftId(ShiftStatus.Id);
-              btnCloseShiftSimpleCurl.Enabled := True;
-
-              // ОНОВЛЮЄМО СТАТУС ЗМІНИ
-              UpdateShiftStatus(svOpened, '№' + IntToStr(ShiftStatus.Serial));
-
-              Log('Зміну успішно відновлено: ' + ShiftStatus.Id + sLineBreak +
-                         'Номер: ' + IntToStr(ShiftStatus.Serial) + sLineBreak +
-                         'Відкрита: ' + DateTimeToStr(ShiftStatus.OpenedAt));
-
-              // Оновлюємо баланс відновленої зміни
-              if Assigned(ShiftStatus.Balance) then
-              begin
-                FCurrentBalance := ShiftStatus.Balance.Balance;
-                UpdateCashBalance;
-                Log(Format('Баланс відновленої зміни: %.2f грн', [FCurrentBalance / 100]));
-              end;
-            end
-            else
-            begin
-              // Зміна вже закрита або недійсна
-              Log('Збережена зміна неактивна. Статус: ' + ShiftStatus.Status);
-              // ОНОВЛЮЄМО СТАТУС ЗМІНИ
-              UpdateShiftStatus(svClosed, 'Неактивна');
-              ClearShiftStateFile;
-              ShowMessage('Збережена зміна вже закрита або неактивна. Статус: ' + ShiftStatus.Status);
-            end;
-          finally
-            FreeAndNil(ShiftStatus);
-          end;
-        end
-        else
-        begin
-          // Помилка перевірки статусу
-          Log('Не вдалося перевірити статус зміни: ' + AuthResponse);
-          // ОНОВЛЮЄМО СТАТУС ЗМІНИ
-          UpdateShiftStatus(svError, 'Помилка перевірки');
-
-          if MessageDlg('Помилка перевірки',
-              'Не вдалося перевірити статус збереженої зміни.' + sLineBreak +
-              'Можливі причини:' + sLineBreak +
-              '- Втрачено зв''язок з сервером' + sLineBreak +
-              '- Зміна була видалена' + sLineBreak +
-              '- Проблеми з авторизацією' + sLineBreak + sLineBreak +
-              'Видалити збережений стан?',
-              mtWarning, [mbYes, mbNo], 0) = mrYes then
-          begin
-            ClearShiftStateFile;
-            Log('Користувач видалив збережений стан зміни');
-          end
-          else
-          begin
-            Log('Користувач зберіг стан зміни для подальших спроб');
-          end;
-        end;
-    end
-    else
-    begin
-      Log('Збережена зміна не знайдена');
-      // ОНОВЛЮЄМО СТАТУС ЗМІНИ
-      UpdateShiftStatus(svClosed, 'Не знайдена');
-    end;
-
-    // Активуємо кнопки в залежності від стану
-    if (FReceiptAPI.CurrentShiftId <> '') then
-    begin
-      btnCloseShiftSimpleCurl.Enabled := True;
-      Log('Інтерфейс налаштовано для роботи зі зміною');
-    end;
-   UpdateAllStatuses;
-  end;
-  // === КІНЕЦЬ НОВОГО КОДУ ===
+  // Оновлення списку кас (незалежно від API, бо потрібно для UI)
   LoadCashRegisterPreferences;
-  if not ValidateAPIState(False, False, True) then // Потрібен список кас
-      Exit;
-  RefreshCashRegisterList;  // Оновити список
-  // Знайти збережений ID у списку
-  for i := 0 to High(FCashRegisters) do
+  if ValidateAPIState(False, False, True) then
   begin
-    if FCashRegisters[i].Id = edtCashRegisterId.Text then
-    begin
-      cmbCashRegisters.ItemIndex := i;
-      cmbCashRegistersChange(nil);  // Застосувати вибір
-      Break;
-    end;
+    RefreshCashRegisterList;
+    for i := 0 to High(FCashRegisters) do
+      if FCashRegisters[i].Id = edtCashRegisterId.Text then
+      begin
+        cmbCashRegisters.ItemIndex := i;
+        cmbCashRegistersChange(nil);
+        Break;
+      end;
   end;
 
   Log('Ініціалізація форми завершена');
+  LogTokenStatus;
+  CheckPendingFiscalizations;
+  UpdateAllStatuses;
+end;
 
-
+procedure TFmChek.LogTokenStatus;
+begin
   if Assigned(FReceiptAPI) then
   begin
     Log('=== ДЕТАЛЬНА ПЕРЕВІРКА ТОКЕНА ===');
@@ -4014,30 +3853,31 @@ begin
     Log('API assigned: ❌');
     Log('================================');
   end;
-  CheckPendingFiscalizations;
-
-  UpdateAllStatuses;
 end;
-
 
 procedure TFmChek.frReport1GetValue(const ParName: String;
   var ParValue: Variant);
 begin
- if ParName = 'nomer' then ParValue:= nomer
- else if ParName = 'datavv' then ParValue:= datavv
- else if ParName = 'nalkod' then ParValue:= nalkod
- else if ParName = 'psvid' then ParValue:= psvid
- else if ParName = 'pnazshort' then ParValue:=pnazshort
- else if ParName = 'pnazva' then ParValue:=pnazva
- else  if ParName = 'sump' then
- begin
-  if DMMag.QChekSUMMA.IsNull then
-  ParValue:= ''
-  else
-  ParValue:= suma_prop(floattostrf(round(DMMag.QChekSUMMA.Asfloat*100)/100,ffNumber,10,2));
- end;
+  if ParName = 'nomer' then
+    ParValue := FDBManager.nomer
+  else if ParName = 'datavv' then
+    ParValue := FDBManager.datavv
+  else if ParName = 'nalkod' then
+    ParValue := FDBManager.nalkod
+  else if ParName = 'psvid' then
+    ParValue := FDBManager.psvid
+  else if ParName = 'pnazshort' then
+    ParValue := FDBManager.pnazshort
+  else if ParName = 'pnazva' then
+    ParValue := FDBManager.pnazva
+  else if ParName = 'sump' then
+  begin
+    if DMMag.QChekSUMMA.IsNull then
+      ParValue := ''
+    else
+      ParValue := suma_prop(floattostrf(round(DMMag.QChekSUMMA.AsFloat * 100) / 100, ffNumber, 10, 2));
+  end;
 end;
-
 
 procedure TFmChek.Log(const AMessage: string);
 var
@@ -5371,40 +5211,68 @@ begin
 end;
 
 // Додатковий метод для офлайн-збереження (заглушка)
-procedure TFmChek.SaveReceiptToOfflineQueue(CheckID: Integer);
+{===  ОНОВЛЕНА ФУНКЦІЯ SaveReceiptToOfflineQueue ===}
+
+procedure TFmChek.SaveReceiptToOfflineQueue(CheckID: Integer; Receipt: TReceipt;
+  const JsonString, ErrorResponse: string);
+var
+  ReceiptUUID: string;
 begin
   try
-    // Тут може бути логіка збереження чека в офлайн-чергу
-    // Наприклад, запис в окрему таблицю для подальшої обробки
+    if Assigned(Receipt) then
+      ReceiptUUID := Receipt.Id
+    else
+      ReceiptUUID := '';
+
     DMMag.SQLQ.SQL.Text :=
-      'INSERT INTO OFFLINE_RECEIPTS_QUEUE (CHECK_ID, CREATED_AT, STATUS) ' +
-      'VALUES (:CHECK_ID, CURRENT_TIMESTAMP, ''PENDING'')';
+      'INSERT INTO OFFLINE_RECEIPTS_QUEUE (' +
+      '  CHECK_ID, RECEIPT_UUID, RECEIPT_JSON, ERROR_MSG, ' +
+      '  CREATED_AT, STATUS, RETRY_COUNT) ' +
+      'VALUES (' +
+      '  :CHECK_ID, :RECEIPT_UUID, :RECEIPT_JSON, :ERROR_MSG, ' +
+      '  CURRENT_TIMESTAMP, ''PENDING'', 0)';
+
     DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+    DMMag.SQLQ.ParamByName('RECEIPT_UUID').AsString := ReceiptUUID;
+    DMMag.SQLQ.ParamByName('RECEIPT_JSON').AsString := JsonString;
+    DMMag.SQLQ.ParamByName('ERROR_MSG').AsString := Copy(ErrorResponse, 1, 500);
     DMMag.SQLQ.ExecSQL;
 
-    Log('Чек ' + IntToStr(CheckID) + ' додано до офлайн-черги');
+    Log('Чек ' + IntToStr(CheckID) + ' (UUID: ' + Copy(ReceiptUUID, 1, 8) +
+        '...) додано до офлайн-черги');
   except
     on E: Exception do
     begin
-      Log('Помилка збереження в офлайн-чергу: ' + E.Message);
+      Log('❌ Помилка збереження в офлайн-чергу: ' + E.Message);
+      raise;
     end;
   end;
 end;
 
-function TFmChek.ShouldRetryFiscalization(ACheckID: Integer; const AResponse: string; CurrentRetry: Integer): Boolean;
+function TFmChek.ShouldRetryFiscalization(ACheckID: Integer; const AResponse: string;
+  CurrentRetry: Integer; const ReceiptIdAlreadySent: string): Boolean;
 begin
-  // Максимум 3 спроби для мережевих помилок, 1 спроба для помилок валідації
+  if ReceiptIdAlreadySent <> '' then
+  begin
+    Result := False;
+    Log('⛔ Чек вже створений на сервері (ID: ' + ReceiptIdAlreadySent +
+        '). Повторна спроба заборонена.');
+    Exit;
+  end;
+
   if IsNetworkError(AResponse) then
     Result := CurrentRetry < 3
-  else if (Pos('валідації', AResponse) > 0) or (Pos('validation', LowerCase(AResponse)) > 0) then
-    Result := CurrentRetry < 1  // Для помилок валідації - тільки 1 спроба
-  else if (Pos('shift', LowerCase(AResponse)) > 0) or (Pos('offline', LowerCase(AResponse)) > 0) then
-    Result := CurrentRetry < 1  // Для проблем зі зміною/офлайном - тільки 1 спроба
+  else if (Pos('validation', LowerCase(AResponse)) > 0) or
+          (Pos('валідації', AResponse) > 0) then
+    Result := CurrentRetry < 1
+  else if (Pos('shift', LowerCase(AResponse)) > 0) or
+          (Pos('offline', LowerCase(AResponse)) > 0) then
+    Result := CurrentRetry < 1
   else
-    Result := CurrentRetry < 2; // Для інших помилок - максимум 2 спроби
+    Result := CurrentRetry < 2;
 
   if not Result then
-    Log('Досягнуто максимальну кількість спроб для цього типу помилки. Поточні спроби: ' + IntToStr(CurrentRetry));
+    Log('Досягнуто максимальну кількість спроб. Поточні: ' + IntToStr(CurrentRetry));
 end;
 
 function TFmChek.IsNetworkError(const AResponse: string): Boolean;
@@ -5423,26 +5291,32 @@ end;
 procedure TFmChek.FillMandatoryReceiptFields(Receipt: TReceipt; CheckID: Integer);
 begin
   Receipt.Id := FReceiptAPI.GenerateUUID;
-  Log('Згенеровано Receipt.Id через API: ' + Receipt.Id);
+  Log('Згенеровано Receipt.Id: ' + Receipt.Id);
 
-  //Receipt.CashierName := pnazshort;
-  //Receipt.Departament := pnazva;
   Receipt.CashierName := FCashierNameFromIni;
   Receipt.Departament := FDepartamentFromIni;
   Receipt.OrderId := '';
+
+  // Тип чека - enum з ReceiptWebAPI
+  Receipt.ReceiptType := rtSell;
+
+  // Округлення в копійках (0 = без округлення)
+  Receipt.RoundingSum := 0;
 
   FillGoodsFromDatabase(Receipt, CheckID);
 
   Receipt.TotalSum := CalculateTotalSum(Receipt.Goods);
   Receipt.Sum := Receipt.TotalSum;
 
-  Log('Загальна сума після розрахунку: ' + FloatToStrF(Receipt.TotalSum/100, ffNumber, 10, 2) + ' грн');
+  Log('Загальна сума: ' +
+      FloatToStrF(Receipt.TotalSum/100, ffNumber, 10, 2) + ' грн');
 
   FillPaymentsFromDatabase(Receipt, CheckID);
 
+  // Rounding: Boolean - legacy, не використовується в JSON
   Receipt.Rounding := False;
 
-  Log('Заповнено обовʼязкові поля чека. OrderId: "' + Receipt.OrderId + '"');
+  Log('Заповнено обовʼязкові поля. OrderId: "" (буде null в JSON)');
 end;
 
 
@@ -5452,6 +5326,8 @@ var
   Good: TGood;
   GoodItem: TGoodItem;
   TaxGroup: Integer;
+  BarcodeStr: string;
+  TovarKod: Integer;
 begin
   SetLength(Receipt.Goods, 0);
 
@@ -5459,8 +5335,41 @@ begin
   i := 0;
   while not DMMag.QNData.Eof do
   begin
-    // Визначаємо податкову групу для товару
+    // Визначаємо податкову групу
     TaxGroup := DetermineTaxGroupForProduct(DMMag.QNData.FieldByName('TOVAR').AsString);
+
+    // ВАЛІДАЦІЯ: перевірка, що податкова група існує в Checkbox
+    if not IsTaxGroupValid(TaxGroup) then
+    begin
+      raise Exception.CreateFmt(
+        'Товар "%s" має невідому податкову групу %d. ' +
+        'Налаштуйте податкові ставки в кабінеті Checkbox.',
+        [DMMag.QNData.FieldByName('NAZVA').AsString, TaxGroup]);
+    end;
+
+    // === ОТРИМАННЯ ШТРИХ-КОДУ З ТАБЛИЦІ TOVAR ===
+    BarcodeStr := '';
+    TovarKod := DMMag.QNData.FieldByName('TOVAR').AsInteger;
+    try
+      // Шукаємо штрих-код в таблиці TOVAR через окремий запит
+      DMMag.SQLQ.Close;
+      DMMag.SQLQ.SQL.Text :=
+        'SELECT TKOD FROM TOVAR WHERE KOD = :KOD AND TKOD IS NOT NULL';
+      DMMag.SQLQ.ParamByName('KOD').AsInteger := TovarKod;
+      DMMag.SQLQ.Open;
+
+      if not DMMag.SQLQ.IsEmpty then
+        BarcodeStr := Trim(DMMag.SQLQ.FieldByName('TKOD').AsString);
+
+      DMMag.SQLQ.Close;
+    except
+      on E: Exception do
+      begin
+        Log('⚠️ Помилка отримання штрих-коду для товару ' +
+            IntToStr(TovarKod) + ': ' + E.Message);
+        BarcodeStr := '';
+      end;
+    end;
 
     // Створюємо товар
     Good := TGood.Create;
@@ -5468,46 +5377,48 @@ begin
       Good.Code := DMMag.QNData.FieldByName('TOVAR').AsString;
       Good.Name := DMMag.QNData.FieldByName('NAZVA').AsString;
       Good.Price := Round(DMMag.QNData.FieldByName('CENA').AsFloat * 100);
-      Good.Barcode := DMMag.QNData.FieldByName('TOVAR').AsString;
 
-      // Додаємо податки для товару
+      // Штрих-код з TOVAR.TKOD (може бути порожнім)
+      Good.Barcode := BarcodeStr;
+      if BarcodeStr <> '' then
+        Log('Штрих-код товару ' + Good.Name + ': ' + BarcodeStr)
+      else
+        Log('Штрих-код товару ' + Good.Name + ': відсутній');
+
+      // Податки
       SetLength(Good.Tax, 1);
       Good.Tax[0] := TaxGroup;
 
-      // Створюємо позицію товару
+      // Створюємо позицію
       GoodItem := TGoodItem.Create;
       try
         GoodItem.Good := Good;
-
-        // Генерація коректного GoodId через API функцію
         GoodItem.GoodId := FReceiptAPI.GenerateUUID;
-
         GoodItem.Quantity := Round(DMMag.QNData.FieldByName('KOL').AsFloat * 1000);
         GoodItem.Sum := Round(DMMag.QNData.FieldByName('SUMMA').AsFloat * 100);
         GoodItem.TotalSum := GoodItem.Sum;
         GoodItem.IsReturn := False;
         GoodItem.IsWinningsPayout := False;
 
-        // Додаємо податки для позиції товару
+        // Податки для позиції
         SetLength(GoodItem.Taxes, 1);
         GoodItem.Taxes[0] := CreateTaxByGroup(TaxGroup);
 
-        // Додаємо до масиву
         SetLength(Receipt.Goods, Length(Receipt.Goods) + 1);
         Receipt.Goods[High(Receipt.Goods)] := GoodItem;
 
-        Log(Format('Додано товар: %s (податок %d) x %.3f = %.2f грн, GoodId: %s', [
-          DMMag.QNData.FieldByName('NAZVA').AsString,
+        Log(Format('Додано товар: %s (штрих-код: %s, податок %d) x %.3f = %.2f грн', [
+          Good.Name,
+          IfThen(BarcodeStr = '', 'немає', BarcodeStr),
           TaxGroup,
-          DMMag.QNData.FieldByName('KOL').AsFloat,
-          GoodItem.TotalSum / 100,
-          Copy(GoodItem.GoodId, 1, 8) + '...'
+          GoodItem.Quantity / 1000,
+          GoodItem.TotalSum / 100
         ]));
 
       except
         on E: Exception do
         begin
-          Log('Помилка створення GoodItem: ' + E.Message);
+          Log('❌ Помилка створення GoodItem: ' + E.Message);
           FreeAndNil(GoodItem);
           raise;
         end;
@@ -5516,7 +5427,7 @@ begin
     except
       on E: Exception do
       begin
-        Log('Помилка створення Good: ' + E.Message);
+        Log('❌ Помилка створення Good: ' + E.Message);
         FreeAndNil(Good);
         raise;
       end;
@@ -5527,12 +5438,9 @@ begin
   end;
 
   if Length(Receipt.Goods) = 0 then
-  begin
-    Log('Попередження: чек не містить товарів!');
     raise Exception.Create('Чек не містить товарів для фіскалізації');
-  end;
 
-  Log('Успішно додано ' + IntToStr(Length(Receipt.Goods)) + ' товарів до чека');
+  Log('Успішно додано ' + IntToStr(Length(Receipt.Goods)) + ' товарів');
 end;
 
 
@@ -5558,251 +5466,203 @@ begin
 end;
 
 
+// ===== ВИПРАВЛЕНИЙ FillPaymentsFromDatabase =====
 procedure TFmChek.FillPaymentsFromDatabase(Receipt: TReceipt; CheckID: Integer);
-
- function PaymentTypeToString(PaymentType: TPaymentType): string;
- begin
-   if PaymentType = ptCash then
-     Result := 'CASH'
-   else if PaymentType = ptCashless then
-     Result := 'CASHLESS'
-   else
-     Result := 'UNKNOWN (' + IntToStr(Ord(PaymentType)) + ')';
- end;
-
 var
-  CashAmount, CardAmount: Integer;
+  Details: TPaymentDetails;
   PaymentType: string;
-  i: integer;
-  OriginalPaymentType: string;
+  SubType: Integer;
+  i: Integer;
+  TotalPaymentCents: Integer;
+  PaymentIdx: Integer;
+  CashAmountCents: Integer;
+  CardAmountCents: Integer;
 begin
   SetLength(Receipt.Payments, 0);
+  PaymentIdx := 0;
 
-  // ДЕТАЛЬНЕ ЛОГУВАННЯ ПОЧАТКУ МЕТОДУ
-  Log('=== FillPaymentsFromDatabase ===');
+  Log('=== FillPaymentsFromDatabase (комбінована оплата) ===');
   Log('CheckID: ' + IntToStr(CheckID));
-  Log('Початок отримання даних оплати з БД');
 
-  // Отримуємо дані про оплату з таблиці CHEK
-  DMMag.SQLQ.SQL.Text :=
-    'SELECT PAYMENT_TYPE, CASH_AMOUNT, CARD_AMOUNT ' +
-    'FROM CHEK WHERE KOD = :CHECK_ID';
-  DMMag.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
+  if not FDBManager.GetPaymentDetails(CheckID, Details) then
+  begin
+    Log('❌ Не вдалося отримати деталі оплати');
+    Exit;
+  end;
 
-  try
-    DMMag.SQLQ.Open;
+  PaymentType := Details.PaymentType;
+  SubType := Details.PaymentSubType;
 
-    // ЗАПИСУЄМО ПОЧАТКОВІ ДАНІ ДЛЯ ДІАГНОСТИКИ
-    OriginalPaymentType := DMMag.SQLQ.FieldByName('PAYMENT_TYPE').AsString;
-    CashAmount := Round(DMMag.SQLQ.FieldByName('CASH_AMOUNT').AsFloat * 100);
-    CardAmount := Round(DMMag.SQLQ.FieldByName('CARD_AMOUNT').AsFloat * 100);
+  CashAmountCents := Round(Details.CashAmount * 100);
+  CardAmountCents := Round(Details.CardAmount * 100);
+  TotalPaymentCents := CashAmountCents + CardAmountCents;
 
-    // ДЕТАЛЬНЕ ЛОГУВАННЯ ОТРИМАНИХ ДАНИХ
-    Log('--- ДАНІ З БАЗИ ДАНИХ ---');
-    Log('PAYMENT_TYPE: ' + OriginalPaymentType);
-    Log('CASH_AMOUNT: ' + FloatToStrF(DMMag.SQLQ.FieldByName('CASH_AMOUNT').AsFloat, ffNumber, 10, 2) + ' грн');
-    Log('CARD_AMOUNT: ' + FloatToStrF(DMMag.SQLQ.FieldByName('CARD_AMOUNT').AsFloat, ffNumber, 10, 2) + ' грн');
-    Log('CASH_AMOUNT (коп): ' + IntToStr(CashAmount));
-    Log('CARD_AMOUNT (коп): ' + IntToStr(CardAmount));
-    Log('--- КІНЕЦЬ ДАНИХ З БД ---');
+  Log('Тип: ' + PaymentType + ', підтип: ' + IntToStr(SubType));
+  Log('Готівка: ' + FloatToStrF(Details.CashAmount, ffNumber, 10, 2) +
+      ' грн, Безготівка: ' + FloatToStrF(Details.CardAmount, ffNumber, 10, 2) + ' грн');
 
-    PaymentType := OriginalPaymentType;
+  // === КОМБІНОВАНА ОПЛАТА ===
+  if CashAmountCents > 0 then
+  begin
+    SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+    Receipt.Payments[PaymentIdx] := FReceiptAPI.CreatePayment(ptCash, CashAmountCents);
+    Receipt.Payments[PaymentIdx].LabelText := 'Готівка';
+    Log('✅ Готівка: ' + FloatToStrF(CashAmountCents / 100, ffNumber, 10, 2) + ' грн');
+    Inc(PaymentIdx);
+  end;
 
-    // Лог для відстеження логіки вибору
-    Log('Обробка типу оплати: ' + PaymentType);
-    Log('CashAmount > 0: ' + BoolToStr(CashAmount > 0, True));
-    Log('CardAmount > 0: ' + BoolToStr(CardAmount > 0, True));
-
-    // Спрощена логіка відповідно до документації
+  if CardAmountCents > 0 then
+  begin
     case PaymentType of
-      'CASH':
+      'CASHLESS':
         begin
-          Log('Обробка CASH оплати');
-          if CashAmount > 0 then
-          begin
-            SetLength(Receipt.Payments, 1);
-            // Готівкова оплата - тип "CASH"
-            Receipt.Payments[0] := FReceiptAPI.CreatePayment(ptCash, CashAmount);
-            Receipt.Payments[0].LabelText := 'Готівка';
-            Receipt.Payments[0].Code := 0; // Код для готівки
+          case SubType of
+            1: // Картка (термінал)
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateCashlessPayment(
+                  CardAmountCents, TCashlessSubType(SubType));
+                Receipt.Payments[PaymentIdx].LabelText := 'Картка';
+                Log('✅ Картка');
+              end;
 
-            Log('✅ Створено готівкову оплату: ' + FloatToStrF(CashAmount/100, ffNumber, 10, 2) + ' грн');
-            Log('Payment Type: ' + PaymentTypeToString(Receipt.Payments[0].PaymentType));
-            Log('Label: ' + Receipt.Payments[0].LabelText);
-            Log('Code: ' + IntToStr(Receipt.Payments[0].Code));
-            Log('Value: ' + IntToStr(Receipt.Payments[0].Value) + ' коп');
-          end
+            2: // Інтернет-банкінг
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateInternetBankingPayment(
+                  CardAmountCents, Details.IBAN, Details.RecipientName, Details.PaymentPurpose);
+                Receipt.Payments[PaymentIdx].LabelText := 'Інтернет банкінг';
+                Log('✅ Інтернет-банкінг');
+              end;
+
+            3: // Інтернет еквайринг
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateCashlessPayment(
+                  CardAmountCents, TCashlessSubType(SubType));
+                Receipt.Payments[PaymentIdx].LabelText := 'Інтернет еквайринг';
+                Log('✅ Інтернет еквайринг');
+              end;
+
+            4: // LiqPay
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateIntegratorPayment(
+                  CardAmountCents, 'LiqPay');
+                Receipt.Payments[PaymentIdx].LabelText := 'Платіж через інтегратора LiqPay';
+                Log('✅ LiqPay');
+              end;
+
+            5: // Mono
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateIntegratorPayment(
+                  CardAmountCents, 'mono');
+                Receipt.Payments[PaymentIdx].LabelText := 'Платіж через інтегратора mono';
+                Log('✅ Mono');
+              end;
+
+            6: // WayForPay
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateIntegratorPayment(
+                  CardAmountCents, 'WayForPay');
+                Receipt.Payments[PaymentIdx].LabelText := 'Платіж через інтегратора WayForPay';
+                Log('✅ WayForPay');
+              end;
+
+            7: // NovaPay
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateIntegratorPayment(
+                  CardAmountCents, 'NovaPay');
+                Receipt.Payments[PaymentIdx].LabelText := 'Платіж через NovaPay';
+                Log('✅ NovaPay');
+              end;
+
+            8: // EasyPay
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateIntegratorPayment(
+                  CardAmountCents, 'EasyPay');
+                Receipt.Payments[PaymentIdx].LabelText := 'Платіж через інтегратора EasyPay';
+                Log('✅ EasyPay');
+              end;
+
+            9: // Подарунковий сертифікат
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateCashlessPayment(
+                  CardAmountCents, TCashlessSubType(SubType));
+                Receipt.Payments[PaymentIdx].LabelText := 'Подарунковий сертифікат';
+                Log('✅ Подарунковий сертифікат');
+              end;
+
+            10..17: // Інші підтипи
+              begin
+                SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+                Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateCashlessPayment(
+                  CardAmountCents, TCashlessSubType(SubType));
+                Receipt.Payments[PaymentIdx].LabelText := CashlessSubTypeNames[SubType];
+                Log('✅ ' + CashlessSubTypeNames[SubType]);
+              end;
+
           else
-          begin
-            Log('⚠️ Попередження: CASH тип, але CashAmount <= 0');
+            SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+            Receipt.Payments[PaymentIdx] := FReceiptAPI.CreateCashlessPayment(
+              CardAmountCents, cstCard);
+            Receipt.Payments[PaymentIdx].LabelText := 'Картка';
+            Log('⚠️ Невідомий підтип ' + IntToStr(SubType) + ', використано картку');
           end;
+          Inc(PaymentIdx);
         end;
 
-      'CARD':
+      'OTHER':
         begin
-          Log('Обробка CARD оплати');
-          if CardAmount > 0 then
-          begin
-            SetLength(Receipt.Payments, 1);
-            // Безготівкова оплата - тип "CASHLESS"
-            Receipt.Payments[0] := FReceiptAPI.CreatePayment(ptCashless, CardAmount);
-            Receipt.Payments[0].LabelText := 'Картка';
-            Receipt.Payments[0].Code := 1; // Код для безготівкової оплати
-
-            Log('✅ Створено карткову оплату: ' + FloatToStrF(CardAmount/100, ffNumber, 10, 2) + ' грн');
-            Log('Payment Type: ' + PaymentTypeToString(Receipt.Payments[0].PaymentType));
-            Log('Label: ' + Receipt.Payments[0].LabelText);
-            Log('Code: ' + IntToStr(Receipt.Payments[0].Code));
-            Log('Value: ' + IntToStr(Receipt.Payments[0].Value) + ' коп');
-          end
-          else
-          begin
-            Log('⚠️ Попередження: CARD тип, але CardAmount <= 0');
-          end;
+          SetLength(Receipt.Payments, Length(Receipt.Payments) + 1);
+          Receipt.Payments[PaymentIdx] := FReceiptAPI.CreatePayment(ptOther, CardAmountCents);
+          Receipt.Payments[PaymentIdx].LabelText := 'Інше';
+          Log('✅ Інше');
+          Inc(PaymentIdx);
         end;
 
-      'MIXED':
-        begin
-          Log('Обробка MIXED оплати');
-          // Змішана оплата - створюємо два платежі
-          SetLength(Receipt.Payments, 2);
-
-          // Готівкова частина
-          Receipt.Payments[0] := FReceiptAPI.CreatePayment(ptCash, CashAmount);
-          Receipt.Payments[0].LabelText := 'Готівка';
-          Receipt.Payments[0].Code := 0;
-
-          // Карткова частина
-          Receipt.Payments[1] := FReceiptAPI.CreatePayment(ptCashless, CardAmount);
-          Receipt.Payments[1].LabelText := 'Картка';
-          Receipt.Payments[1].Code := 1;
-
-          Log('✅ Створено змішану оплату:');
-          Log('  Готівка=' + FloatToStrF(CashAmount/100, ffNumber, 10, 2) + ' грн');
-          Log('  Картка=' + FloatToStrF(CardAmount/100, ffNumber, 10, 2) + ' грн');
-          Log('  Payment[0] Type: ' + PaymentTypeToString(Receipt.Payments[0].PaymentType));
-          Log('  Payment[1] Type: ' + PaymentTypeToString(Receipt.Payments[1].PaymentType));
-        end;
-
-      else
-        begin
-          Log('❌ НЕВІДОМИЙ ТИП ОПЛАТИ: ' + PaymentType);
-          Log('Доступні типи: CASH, CARD, MIXED');
-
-          // Аварійна обробка - створюємо оплату за замовчуванням
-          if (CashAmount > 0) or (CardAmount > 0) then
-          begin
-            SetLength(Receipt.Payments, 1);
-            if CashAmount > 0 then
-            begin
-              Receipt.Payments[0] := FReceiptAPI.CreatePayment(ptCash, CashAmount);
-              Receipt.Payments[0].LabelText := 'Готівка (авто)';
-              Receipt.Payments[0].Code := 0;
-              Log('🔄 Автоматично обрано CASH: ' + FloatToStrF(CashAmount/100, ffNumber, 10, 2) + ' грн');
-            end
-            else
-            begin
-              Receipt.Payments[0] := FReceiptAPI.CreatePayment(ptCashless, CardAmount);
-              Receipt.Payments[0].LabelText := 'Картка (авто)';
-              Receipt.Payments[0].Code := 1;
-              Log('🔄 Автоматично обрано CARD: ' + FloatToStrF(CardAmount/100, ffNumber, 10, 2) + ' грн');
-            end;
-          end;
-        end;
-    end;
-
-    // Логування підсумків створення платежів
-    Log('--- ПІДСУМКИ СТВОРЕНИХ ПЛАТЕЖІВ ---');
-    Log('Кількість платежів: ' + IntToStr(Length(Receipt.Payments)));
-    for i := 0 to High(Receipt.Payments) do
-    begin
-      if Assigned(Receipt.Payments[i]) then
-      begin
-        Log('Платіж[' + IntToStr(i) + ']:');
-        Log('  Type: ' + PaymentTypeToString(Receipt.Payments[i].PaymentType));
-        Log('  Label: ' + Receipt.Payments[i].LabelText);
-        Log('  Code: ' + IntToStr(Receipt.Payments[i].Code));
-        Log('  Value: ' + IntToStr(Receipt.Payments[i].Value) + ' коп');
-      end
-      else
-      begin
-        Log('❌ Платіж[' + IntToStr(i) + ']: НЕ ІНІЦІАЛІЗОВАНО!');
-      end;
-    end;
-
-  except
-    on E: Exception do
-    begin
-      Log('💥 ВИНЯТОК у FillPaymentsFromDatabase:');
-      Log('Помилка: ' + E.Message);
-      Log('Клас: ' + E.ClassName);
-      raise; // Передаємо виняток далі
+    else
+      Log('⚠️ Невідомий тип: ' + PaymentType);
     end;
   end;
 
-  // Перевірка сум
-  Log('--- ПЕРЕВІРКА СУМ ---');
+  // Розрахунок загальної суми оплат
   Receipt.TotalPayment := 0;
   for i := 0 to High(Receipt.Payments) do
-  begin
     if Assigned(Receipt.Payments[i]) then
-    begin
       Receipt.TotalPayment := Receipt.TotalPayment + Receipt.Payments[i].Value;
-      Log('Додано платіж[' + IntToStr(i) + ']: ' + IntToStr(Receipt.Payments[i].Value) + ' коп');
-    end
-    else
-    begin
-      Log('❌ Пропущено неініціалізований платіж[' + IntToStr(i) + ']');
-    end;
-  end;
 
   Receipt.Rest := Receipt.TotalPayment - Receipt.TotalSum;
 
-  Log('--- ФІНАЛЬНІ СУМИ ---');
-  Log('TotalSum (товари): ' + IntToStr(Receipt.TotalSum) + ' коп');
-  Log('TotalPayment (оплата): ' + IntToStr(Receipt.TotalPayment) + ' коп');
-  Log('Rest (решта): ' + IntToStr(Receipt.Rest) + ' коп');
-  Log('TotalSum (грн): ' + FloatToStrF(Receipt.TotalSum/100, ffNumber, 10, 2) + ' грн');
-  Log('TotalPayment (грн): ' + FloatToStrF(Receipt.TotalPayment/100, ffNumber, 10, 2) + ' грн');
-  Log('Rest (грн): ' + FloatToStrF(Receipt.Rest/100, ffNumber, 10, 2) + ' грн');
-
-  // Додаткова перевірка коректності
+  // ВАЛІДАЦІЯ
   if Receipt.TotalPayment < Receipt.TotalSum then
-  begin
-    Log('⚠️ УВАГА: Сума оплати менша за суму товарів!');
-    Log('Різниця: ' + IntToStr(Receipt.TotalSum - Receipt.TotalPayment) + ' коп');
-  end
-  else if Receipt.TotalPayment > Receipt.TotalSum then
-  begin
-    Log('ℹ️ Інформація: Решта клієнту: ' + IntToStr(Receipt.Rest) + ' коп');
-  end;
+    raise Exception.CreateFmt(
+      'Сума оплат (%.2f грн) менша за суму чека (%.2f грн). Додайте оплату.',
+      [Receipt.TotalPayment / 100, Receipt.TotalSum / 100]);
 
-  Log('=== КІНЕЦЬ FillPaymentsFromDatabase ===');
+  Log('--- Підсумки ---');
+  Log('TotalSum: ' + IntToStr(Receipt.TotalSum) + ' коп');
+  Log('TotalPayment: ' + IntToStr(Receipt.TotalPayment) + ' коп');
+  Log('Rest: ' + IntToStr(Receipt.Rest) + ' коп');
+  Log('Кількість платежів: ' + IntToStr(Length(Receipt.Payments)));
 end;
-
 
 function TFmChek.CalculateTotalSum(Goods: array of TGoodItem): Integer;
 var
   i: Integer;
 begin
   Result := 0;
-
   for i := 0 to High(Goods) do
   begin
     if Assigned(Goods[i]) then
-    begin
-      Log(Format('Товар %d: %s - кількість: %.3f, ціна: %.2f, сума: %.2f', [
-        i,
-        Goods[i].Good.Name,
-        Goods[i].Quantity / 1000,
-        Goods[i].Good.Price / 100,
-        Goods[i].TotalSum / 100
-      ]));
       Result := Result + Goods[i].TotalSum;
-    end;
   end;
-
-  Log('Загальна сума чека: ' + FloatToStrF(Result/100, ffNumber, 10, 2) + ' грн');
+  Log('Загальна сума товарів: ' + FloatToStrF(Result/100, ffNumber, 10, 2) + ' грн');
 end;
 
 function TFmChek.ExceptionToString(E: Exception): string;
@@ -6211,6 +6071,7 @@ procedure TFmChek.ChangePaymentType(CheckID: Integer; NewPaymentType: string;
   CashAmount: Double = 0; CardAmount: Double = 0; CardInfo: string = '');
 var
   TotalAmount, PaymentTotal: Double;
+  SubType: Integer;
 begin
   // Позиціонування на чек через менеджер
   if not FDBManager.LocateCheck(CheckID) then
@@ -6261,9 +6122,30 @@ begin
     Exit;
   end;
 
-  // Оновлення даних в БД через менеджер
-  FDBManager.UpdatePaymentInfo(CheckID, NewPaymentType, CashAmount, CardAmount,
-    CardInfo, '', '', '');
+  // Визначення підтипу для нової сигнатури UpdatePaymentInfo
+  if NewPaymentType = 'CARD' then
+    SubType := 1   // CST_CARD
+  else
+    SubType := 0;  // Для CASH або MIXED (для змішаної краще використовувати окремі платежі)
+
+  // Оновлення даних в БД через менеджер з новою сигнатурою
+  // Параметри: CheckID, PaymentType, CashAmount, CardAmount, SubType,
+  //            IBAN, RecipientName, PaymentPurpose, CardMask, AuthCode, RRN, ProviderType, TerminalId
+  FDBManager.UpdatePaymentInfo(
+    CheckID,
+    NewPaymentType,
+    CashAmount,
+    CardAmount,
+    SubType,
+    '',          // IBAN
+    '',          // RecipientName
+    '',          // PaymentPurpose
+    CardInfo,    // CardMask (використовуємо CardInfo як маску, якщо потрібно)
+    '',          // AuthCode
+    '',          // RRN
+    '',          // ProviderType
+    ''           // TerminalId
+  );
 
   Log(Format('Змінено тип оплати для чека %d: %s (Г:%.2f, К:%.2f)',
       [CheckID, NewPaymentType, CashAmount, CardAmount]));
@@ -6365,6 +6247,11 @@ begin
   begin
     Log('PNG Z-звіт збережено: ' + FileName);
     ShowCheck(FileName);
+    if MessageDlg('Z-звіт', 'Надрукувати Z-звіт?',mtConfirmation, [mbYes, mbNo], 0) = mrYes then
+    begin
+      PrintCheckCustom(FileName,FPrinterName, FPageLeft, FPageTop, FPageWidth, FPageScale);
+      Log('Z-звіт надіслано на друк');
+    end;
   end
   else
   begin
@@ -6475,6 +6362,500 @@ begin
     UpdateCashierStatus(svUnknown);
 
   // Інші статуси оновлюються окремо
+end;
+
+
+
+procedure TFmChek.InitializeCheckboxAPI;
+var
+  Response, ShiftId, AuthResponse: string;
+  ShiftStatus: TShiftStatus;
+  i: Integer;
+begin
+  // Початкові статуси
+  UpdateAPIStatus(svProcessing, 'Ініціалізація...');
+  UpdateCashierStatus(svUnknown);
+  UpdateCashRegisterStatus(svUnknown);
+  UpdateShiftStatus(svUnknown);
+
+  Log('Перевірка стану Checkbox API...');
+
+  // Базова перевірка API
+  if not ValidateAPIState(False, False) then
+  begin
+    Log('❌ Не вдалося ініціалізувати API або авторизуватися');
+    UpdateAPIStatus(svError, 'Помилка ініціалізації');
+    UpdateCashierStatus(svError, 'Помилка авторизації');
+    Exit;
+  end;
+
+  Log('API успішно ініціалізовано та авторизовано');
+  UpdateAPIStatus(svOnline);
+  UpdateCashierInfo;
+  LoadCashRegisterPreferences;
+
+  // --- КАСА ---
+  if FReceiptAPI.CurrentCashRegisterId = '' then
+  begin
+    Log('Спроба автоматичного вибору оптимальної каси...');
+    UpdateCashRegisterStatus(svProcessing, 'Автоматичний вибір...');
+
+    if InitializeOptimalCashRegister(Response) then
+    begin
+      Log('Касу автоматично обрано: ' + Copy(FReceiptAPI.CurrentCashRegisterId, 1, 8) + '...');
+      SaveCashRegisterPreferences;
+      RefreshCashRegisterList;
+    end
+    else
+    begin
+      Log('Не вдалося автоматично обрати касу: ' + Response);
+      UpdateCashRegisterStatus(svError, 'Не вдалося обрати');
+      RefreshCashRegisterList;
+
+      if Length(FCashRegisters) > 0 then
+        ShowMessage('Не вдалося автоматично обрати касу.' + sLineBreak +
+                   'Будь ласка, виберіть касу вручну зі списку.')
+      else
+        ShowMessage('Не вдалося отримати список кас. Перевірте зʼєднання.');
+    end;
+  end
+  else
+  begin
+    Log('Використовуємо збережену касу: ' + Copy(FReceiptAPI.CurrentCashRegisterId, 1, 8) + '...');
+    UpdateCashRegisterStatus(svReady, 'Збережена каса');
+    RefreshCashRegisterList;
+  end;
+
+  // Перевірка ID каси
+  if FReceiptAPI.CurrentCashRegisterId = '' then
+  begin
+    Log('⚠️ УВАГА: ID каси не встановлено! Операції з готівкою будуть неможливі.');
+    UpdateCashRegisterStatus(svError, 'ID не встановлено');
+  end
+  else
+    Log('✅ ID каси встановлено: ' + Copy(FReceiptAPI.CurrentCashRegisterId, 1, 8) + '...');
+
+  // --- ЗМІНА ---
+  ShiftId := FReceiptAPI.LoadShiftFromFile;
+  if ShiftId <> '' then
+  begin
+    Log('Знайдено збережену зміну: ' + Copy(ShiftId, 1, 8) + '...');
+    UpdateShiftStatus(svProcessing, 'Перевірка...');
+
+    if FReceiptAPI.GetShiftStatusCurl(ShiftId, AuthResponse, ShiftStatus) and Assigned(ShiftStatus) then
+    begin
+      try
+        if ShiftStatus.Status = 'OPENED' then
+        begin
+          SynchronizeShiftId(ShiftStatus.Id);
+          btnCloseShiftSimpleCurl.Enabled := True;
+          UpdateShiftStatus(svOpened, '№' + IntToStr(ShiftStatus.Serial));
+
+          Log('Зміну успішно відновлено: ' + ShiftStatus.Id + sLineBreak +
+              'Номер: ' + IntToStr(ShiftStatus.Serial) + sLineBreak +
+              'Відкрита: ' + DateTimeToStr(ShiftStatus.OpenedAt));
+
+          if Assigned(ShiftStatus.Balance) then
+          begin
+            FCurrentBalance := ShiftStatus.Balance.Balance;
+            UpdateCashBalance;
+            Log(Format('Баланс відновленої зміни: %.2f грн', [FCurrentBalance / 100]));
+          end;
+        end
+        else
+        begin
+          Log('Збережена зміна неактивна. Статус: ' + ShiftStatus.Status);
+          UpdateShiftStatus(svClosed, 'Неактивна');
+          ClearShiftStateFile;
+          ShowMessage('Збережена зміна вже закрита або неактивна. Статус: ' + ShiftStatus.Status);
+        end;
+      finally
+        FreeAndNil(ShiftStatus);
+      end;
+    end
+    else
+    begin
+      Log('Не вдалося перевірити статус зміни: ' + AuthResponse);
+      UpdateShiftStatus(svError, 'Помилка перевірки');
+
+      if MessageDlg('Помилка перевірки',
+          'Не вдалося перевірити статус збереженої зміни.' + sLineBreak +
+          'Можливі причини:' + sLineBreak +
+          '- Втрачено зв''язок з сервером' + sLineBreak +
+          '- Зміна була видалена' + sLineBreak +
+          '- Проблеми з авторизацією' + sLineBreak + sLineBreak +
+          'Видалити збережений стан?',
+          mtWarning, [mbYes, mbNo], 0) = mrYes then
+      begin
+        ClearShiftStateFile;
+        Log('Користувач видалив збережений стан зміни');
+      end
+      else
+        Log('Користувач зберіг стан зміни для подальших спроб');
+    end;
+  end
+  else
+  begin
+    Log('Збережена зміна не знайдена');
+    UpdateShiftStatus(svClosed, 'Не знайдена');
+  end;
+
+  // Активація кнопок
+  if FReceiptAPI.CurrentShiftId <> '' then
+  begin
+    btnCloseShiftSimpleCurl.Enabled := True;
+    Log('Інтерфейс налаштовано для роботи зі зміною');
+  end;
+
+  UpdateAllStatuses;
+end;
+
+
+function TFmChek.PaymentTypeIndexToStr(Index: Integer): string;
+begin
+  case Index of
+    0: Result := 'CASH';
+    1: Result := 'CASHLESS';
+    2: Result := 'OTHER';
+  else
+    Result := 'CASH';
+  end;
+end;
+
+// ===== ВИПРАВЛЕНИЙ PaymentTypeStrToIndex з підтримкою 'CARD' =====
+function TFmChek.PaymentTypeStrToIndex(const S: string): Integer;
+begin
+  if S = 'CASH' then Result := 0
+  else if (S = 'CASHLESS') or (S = 'CARD') then Result := 1   // Додано підтримку 'CARD'
+  else if S = 'OTHER' then Result := 2
+  else Result := 0; // За замовчуванням готівка
+end;
+
+function TFmChek.SubTypeIndexToCode(Index: Integer): Integer;
+begin
+  // Index 0 → CST_CARD (1), Index 1 → CST_INTERNET_BANKING (2), ...
+  Result := Index + 1;
+  if (Result < 1) or (Result > 17) then Result := 1;
+end;
+
+function TFmChek.SubTypeCodeToIndex(Code: Integer): Integer;
+begin
+  Result := Code - 1;
+  if (Result < 0) or (Result > 16) then Result := 0;
+end;
+
+// ===== ВИПРАВЛЕНИЙ UpdatePaymentUIVisibility =====
+procedure TFmChek.UpdatePaymentUIVisibility;
+var
+  SubType: Integer;
+begin
+  if cmbPaymentType.ItemIndex <> 1 then
+  begin
+    // Не "Безготівка" — ховаємо все додаткове
+    cmbCashlessSubType.Visible := False;
+    gbPaymentDetails.Visible := False;
+    Exit;
+  end;
+
+  // "Безготівка" — показуємо підтип
+  cmbCashlessSubType.Visible := True;
+
+  SubType := SubTypeIndexToCode(cmbCashlessSubType.ItemIndex);
+
+  // Визначаємо, чи потрібні додаткові поля
+  case SubType of
+    1, 3: // Картка, Інтернет еквайринг
+      begin
+        gbPaymentDetails.Visible := True;
+        ShowCardDetails(True);
+        ShowInternetBankingDetails(False);
+      end;
+
+    2: // Інтернет-банкінг
+      begin
+        gbPaymentDetails.Visible := True;
+        ShowCardDetails(False);
+        ShowInternetBankingDetails(True);
+      end;
+
+    4..8: // Інтегратори — опціонально AuthCode/RRN
+      begin
+        gbPaymentDetails.Visible := True;
+        ShowCardDetails(False); // можна True, якщо потрібні поля картки
+        ShowInternetBankingDetails(False);
+        // Додатково можна показати поля AuthCode/RRN окремо
+      end;
+
+    9: // Подарунковий сертифікат
+      begin
+        gbPaymentDetails.Visible := True;
+        ShowCardDetails(True); // Маска = номер сертифіката
+        ShowInternetBankingDetails(False);
+      end;
+
+    10..17: // Талон та інші — без додаткових полів
+      begin
+        gbPaymentDetails.Visible := False;
+        ShowCardDetails(False);
+        ShowInternetBankingDetails(False);
+      end;
+  end;
+end;
+
+procedure TFmChek.ShowCardDetails(AShow: Boolean);
+begin
+  gbCardDetails.Visible := AShow;
+  if AShow then
+  begin
+    gbCardDetails.Parent := gbPaymentDetails;
+    gbCardDetails.Align := alTop;
+  end;
+end;
+
+procedure TFmChek.ShowInternetBankingDetails(AShow: Boolean);
+begin
+  gbInternetBanking.Visible := AShow;
+  if AShow then
+  begin
+    gbInternetBanking.Parent := gbPaymentDetails;
+    gbInternetBanking.Align := alTop;
+  end;
+end;
+
+procedure TFmChek.ShowIntegratorDetails(AShow: Boolean);
+begin
+  // Якщо потрібна окрема група для інтеграторів
+  if AShow then
+  begin
+    gbCardDetails.Visible := True;
+    gbCardDetails.Parent := gbPaymentDetails;
+    gbCardDetails.Align := alTop;
+    gbCardDetails.Caption := 'Дані інтегратора';
+  end
+  else
+    gbCardDetails.Visible := False;
+end;
+
+function TFmChek.ValidateIBAN(const AIBAN: string): Boolean;
+begin
+  // UA + 27 цифр = 29 символів
+  Result := (Length(AIBAN) = 29) and
+            (Copy(AIBAN, 1, 2) = 'UA') and
+            (StrToIntDef(Copy(AIBAN, 3, 27), -1) >= 0);
+  // Примітка: повна mod-97 валідація — окремо якщо потрібно
+end;
+
+
+function TFmChek.ValidateCardMask(const AMask: string): Boolean;
+var
+  i, DigitCount: Integer;
+begin
+  Result := False;
+  if (Length(AMask) < 4) or (Length(AMask) > 19) then Exit;
+
+  DigitCount := 0;
+  for i := 1 to Length(AMask) do
+  begin
+    if AMask[i] in ['0'..'9'] then Inc(DigitCount)
+    else if AMask[i] <> '*' then Exit;
+  end;
+  Result := DigitCount >= 4; // Мінімум 4 цифри
+end;
+
+
+function TFmChek.ValidateRRN(const ARRN: string): Boolean;
+begin
+  Result := (Length(ARRN) = 12) and (StrToInt64Def(ARRN, -1) >= 0);
+end;
+
+function TFmChek.ValidateAuthCode(const ACode: string): Boolean;
+begin
+  Result := (Length(ACode) = 6) and (StrToIntDef(ACode, -1) >= 0);
+end;
+
+// ===== ВИПРАВЛЕНИЙ ValidatePaymentFields =====
+function TFmChek.ValidatePaymentFields: Boolean;
+var
+  SubType: Integer;
+begin
+  Result := False;
+
+  if cmbPaymentType.ItemIndex = 1 then // Безготівка
+  begin
+    SubType := SubTypeIndexToCode(cmbCashlessSubType.ItemIndex);
+
+    // Валідація залежно від підтипу
+    case SubType of
+      1, 3: // Картка, Інтернет еквайринг
+        begin
+          if (edtCardMask.Text <> '') and not ValidateCardMask(edtCardMask.Text) then
+          begin
+            ShowMessage('Невірна маска картки. Формат: ****1234 або 1234');
+            edtCardMask.SetFocus;
+            Exit;
+          end;
+          if (edtAuthCode.Text <> '') and not ValidateAuthCode(edtAuthCode.Text) then
+          begin
+            ShowMessage('Код авторизації — 6 цифр');
+            edtAuthCode.SetFocus;
+            Exit;
+          end;
+          if (edtRRN.Text <> '') and not ValidateRRN(edtRRN.Text) then
+          begin
+            ShowMessage('RRN — 12 цифр');
+            edtRRN.SetFocus;
+            Exit;
+          end;
+        end;
+
+      2: // Інтернет-банкінг
+        begin
+          if (edtIBAN.Text <> '') and not ValidateIBAN(edtIBAN.Text) then
+          begin
+            ShowMessage('IBAN має формат UA + 27 цифр (29 символів)');
+            edtIBAN.SetFocus;
+            Exit;
+          end;
+        end;
+
+      4..8: // Інтегратори (LiqPay, Mono, WayForPay, NovaPay, EasyPay)
+        begin
+          // AuthCode та RRN опціонально
+          if (edtAuthCode.Text <> '') and not ValidateAuthCode(edtAuthCode.Text) then
+          begin
+            ShowMessage('Код авторизації — 6 цифр');
+            edtAuthCode.SetFocus;
+            Exit;
+          end;
+          if (edtRRN.Text <> '') and not ValidateRRN(edtRRN.Text) then
+          begin
+            ShowMessage('RRN — 12 цифр');
+            edtRRN.SetFocus;
+            Exit;
+          end;
+        end;
+
+      9: // Подарунковий сертифікат
+        begin
+          if (edtCardMask.Text <> '') and not ValidateCardMask(edtCardMask.Text) then
+          begin
+            ShowMessage('Невірний номер сертифіката');
+            edtCardMask.SetFocus;
+            Exit;
+          end;
+        end;
+
+      10..17: // Талон та інші — без додаткових полів
+        begin
+          // Додаткова валідація не потрібна
+        end;
+    end;
+  end;
+
+  Result := True;
+end;
+
+// ===== ВИПРАВЛЕНИЙ SavePaymentToDB (без помилки Details) =====
+procedure TFmChek.SavePaymentToDB(CheckID: Integer);
+var
+  PaymentType: string;
+  SubType: Integer;
+begin
+  if CheckID <= 0 then Exit;
+
+  PaymentType := PaymentTypeIndexToStr(cmbPaymentType.ItemIndex);
+  SubType := 0;
+
+  if PaymentType = 'CASHLESS' then
+    SubType := SubTypeIndexToCode(cmbCashlessSubType.ItemIndex);
+
+  // Передаємо суму з поточного чека, а не з Details
+  if PaymentType = 'CASH' then
+    FDBManager.UpdatePaymentInfo(CheckID, PaymentType,
+      DMMag.QChekSUMMA.AsFloat, 0, SubType,
+      edtIBAN.Text, edtRecipientName.Text, memPaymentPurpose.Text,
+      edtCardMask.Text, edtAuthCode.Text, edtRRN.Text,
+      cmbProvider.Text, '')
+  else if PaymentType = 'CASHLESS' then
+    FDBManager.UpdatePaymentInfo(CheckID, PaymentType,
+      0, DMMag.QChekSUMMA.AsFloat, SubType,
+      edtIBAN.Text, edtRecipientName.Text, memPaymentPurpose.Text,
+      edtCardMask.Text, edtAuthCode.Text, edtRRN.Text,
+      cmbProvider.Text, '')
+  else // OTHER
+    FDBManager.UpdatePaymentInfo(CheckID, PaymentType,
+      DMMag.QChekSUMMA.AsFloat, 0, 0,
+      edtIBAN.Text, edtRecipientName.Text, memPaymentPurpose.Text,
+      edtCardMask.Text, edtAuthCode.Text, edtRRN.Text,
+      cmbProvider.Text, '');
+end;
+
+// Метод BuildPaymentFromUI (заглушка)
+function TFmChek.BuildPaymentFromUI: TPayment;
+begin
+  // Можна реалізувати, якщо потрібно створювати об'єкт TPayment з UI
+  Result := nil;
+end;
+
+function TFmChek.IsCashlessSubTypeNeedingDetails(SubType: Integer): Boolean;
+begin
+  // Чи потрібні додаткові поля для підтипу
+  Result := SubType in [1, 2, 3, 4, 5, 6, 7, 8, 9];
+end;
+
+// ===== ВИПРАВЛЕНА LoadPaymentToUI (додана конвертація 'CARD' → 'CASHLESS') =====
+procedure TFmChek.LoadPaymentToUI(CheckID: Integer);
+var
+  Details: TPaymentDetails;
+  PaymentTypeStr: string;
+begin
+  if CheckID <= 0 then Exit;
+  if not FDBManager.GetPaymentDetails(CheckID, Details) then Exit;
+
+  FUpdatingPaymentType := True;
+  try
+    // Конвертація старого типу 'CARD' → 'CASHLESS' для зворотної сумісності
+    PaymentTypeStr := Details.PaymentType;
+    if PaymentTypeStr = 'CARD' then
+      PaymentTypeStr := 'CASHLESS';
+
+    // Основний тип
+    cmbPaymentType.ItemIndex := PaymentTypeStrToIndex(PaymentTypeStr);
+
+    // Підтип (тільки для безготівки)
+    if (PaymentTypeStr = 'CASHLESS') or (Details.PaymentType = 'CARD') then
+    begin
+      cmbCashlessSubType.ItemIndex := SubTypeCodeToIndex(Details.PaymentSubType);
+      // Заповнюємо додаткові поля
+      edtCardMask.Text := Details.CardMask;
+      edtAuthCode.Text := Details.AuthCode;
+      edtRRN.Text := Details.RRN;
+      cmbProvider.Text := Details.ProviderType;
+      edtIBAN.Text := Details.IBAN;
+      edtRecipientName.Text := Details.RecipientName;
+      memPaymentPurpose.Text := Details.PaymentPurpose;
+    end;
+
+    UpdatePaymentUIVisibility;
+
+  finally
+    FUpdatingPaymentType := False;
+  end;
+end;
+
+function TFmChek.IsTaxGroupValid(TaxGroup: Integer): Boolean;
+const
+  ValidTaxGroups: array[0..6] of Integer = (1, 2, 3, 4, 5,8, 99);
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := Low(ValidTaxGroups) to High(ValidTaxGroups) do
+    if ValidTaxGroups[i] = TaxGroup then
+    begin
+      Result := True;
+      Break;
+    end;
 end;
 
 initialization
