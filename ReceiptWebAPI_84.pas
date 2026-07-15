@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Process, fpjson, jsonparser, jsonscanner, fgl,
-  regexpr, dateutils, inifiles, TypInfo, Math, StrUtils;
+  regexpr, dateutils, inifiles, TypInfo, Math, StrUtils,chektypes;
 
 type
 
@@ -20,12 +20,13 @@ type
   TDiscountType = (dtDiscount, dtExtraCharge);
   TDiscountMode = (dmValue, dmPercent);
 
-  // Типи для оплати
+  // Типи для оплати (згідно API Checkbox)
   TPaymentType = (
-  ptCash,      // Готівка
-  ptCashless,  // Безготівка
-  ptCard       // Картка - ДОДАЙТЕ ЦЕ ЗНАЧЕННЯ
-);
+    ptCash,      // CASH (code=0)
+    ptCashless,  // CASHLESS (code=1) - включає картку, інтернет-банкінг, сертифікати, тощо
+    ptOther      // OTHER (code=2) - резервний тип
+  );
+
 
   // Типи для типів чеків
   TReceiptType = (rtSell, rtReturn, rtServiceIn, rtServiceOut, rtCashWithdrawal);
@@ -335,7 +336,11 @@ type
     IsPrepaid: Boolean; // Чи є це предоплатою
     LoyaltyProgram: string; // Лояльність/бонусна програма
     LoyaltyPoints: Integer; // Накопичені бонуси
-    destructor Destroy; override;
+
+    // НОВЕ: Підтип безготівкової оплати (для внутрішнього використання)
+    // Не передається в API безпосередньо, використовується для формування label
+    CashlessSubType: TCashlessSubType;
+    constructor Create;
   end;
 
   // Запис для кастомних налаштувань
@@ -366,6 +371,7 @@ type
     Payments: array of TPayment; // Оплати
     Taxes: array of TTax; // Податки на рівні чека - НОВЕ!
     Rounding: Boolean; // Заокруглення
+    RoundingSum: Integer;  // Сума округлення в КОПІЙКАХ (не Boolean!)
     Header: string; // Заголовок
     Footer: string; // Футер
     Barcode: string; // Штрих-код
@@ -678,6 +684,8 @@ type
     function DiscountTypeToString(ADiscountType: TDiscountType): string;
     function DiscountModeToString(ADiscountMode: TDiscountMode): string;
     function PaymentTypeToString(APaymentType: TPaymentType): string;
+    function CashlessSubTypeToString(ASubType: TCashlessSubType): string;
+    function GetCashlessLabel(ASubType: TCashlessSubType; const AIntegratorName: string = ''): string;
 
     function PaymentProviderToString(AProvider: TPaymentProvider): string;
     function StringToTransactionStatus(const Status: string): TTransactionStatus;
@@ -691,7 +699,8 @@ type
     function CheckResponseForErrors(const AResponse: string): Boolean;
     function BuildJsonData(AReceipt: TReceipt): TJSONObject;
     function BuildAuthJsonData: TJSONObject;
-    function BuildOpenShiftJsonData(const AShiftId, AFiscalCode, AFiscalDate: string): TJSONObject;
+    function BuildOpenShiftJsonData(const AShiftId, AFiscalCode, AFiscalDate: string;
+      const AOfflineMode: Boolean): TJSONObject;
     function BuildCloseShiftJsonData(ASkipClientNameCheck: Boolean; AReport: TShiftReport;
                const AFiscalCode, AFiscalDate: string): TJSONObject;
     function BuildGoOnlineJsonData: TJSONObject;
@@ -706,18 +715,12 @@ type
     function ParseShiftReport(const JSONString: string; out AShiftReport: TShiftReport): Boolean;
     function ParseAPIError(const JSONString: string; out AError: TAPIError): Boolean;
     function CashOperationTypeToString(AOperationType: TCashOperationType): string;
-    function BuildCashOperationJsonData(AOperationType: TCashOperationType; AAmount: Integer; ADescription: string): TJSONObject;
-    function CashOperationCurl(AOperationType: TCashOperationType; AAmount: Integer; ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
-    function TryAlternativeCashOperation(AOperationType: TCashOperationType;
-       AAmount: Integer; ADescription: string; out AResponse: string;
-          out AReceiptResponse: TReceiptResponse): Boolean;
     function FormatBalanceInfo(Balance: TBalanceInfo): string;
     function GetAuthToken: string;
     procedure SetAuthToken(const Value: string);
-    function BuildJsonDataCorrected(AReceipt: TReceipt): TJSONObject;
     function IsNetworkError(const AResponse: string): Boolean;
     procedure ProcessReceiptResponse(const ResponseContent: string; out ShouldRetry: Boolean; out ErrorMessage: string);
-
+    function EnsureTokenValid(out AResponse: string): Boolean;
   public
     constructor Create(ABaseURL, AClientName, AClientVersion, ALicenseKey: string;
       ALogProcedure: TLogProcedure = nil);
@@ -806,16 +809,28 @@ type
     function CreateGoodItem(AGood: TGood; AQuantity: Integer): TGoodItem;
     function CreatePayment(APaymentType: TPaymentType; AValue: Integer): TPayment;
 
+    // НОВІ методи створення платежів (згідно Наказу 601)
+    // Універсальний метод для створення безготівкового платежу
+    function CreateCashlessPayment(AValue: Integer; ASubType: TCashlessSubType;
+      const AIntegratorName: string = ''): TPayment;
+
+    // Метод для переказу на IBAN/картку ФОП (карта-ключ)
+    function CreateInternetBankingPayment(AValue: Integer;
+      const ARecipientIBAN, ARecipientName, APaymentPurpose: string): TPayment;
+
+    // Метод для платежу через інтегратора (LiqPay, mono, тощо)
+    function CreateIntegratorPayment(AValue: Integer;
+      const AIntegratorName: string): TPayment;
+
     function ReceiptTypeToString(AReceiptType: TReceiptType): string;
     function CreateTaxByGroup(const ATaxGroup: string): TTax;
     function ValidateReceiptStructure(AReceipt: TReceipt; out AError: string): Boolean;
 
     procedure HandleAuthState(Action: TAuthAction);
 
+    // ЗАСТАРІЛИЙ: Використовуйте CreateCashlessPayment з cstCard
     function CreateCardPayment(AValue: Integer;
-       AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
-
-    
+       AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment; deprecated;
 
     // Нові методи для візуалізації через curl
     function GetReceiptHTML(const AReceiptId: string; out AHTMLContent: string): Boolean;
@@ -833,11 +848,41 @@ type
     function GetSummaryReportPNG(const AReportId: string; out AFileName: string;
       const AReportType: TReportType; const AWidth: Integer = 0; const APaperWidth: Integer = 0): Boolean;
 
-
+    function BuildJsonDataCorrected(AReceipt: TReceipt): TJSONObject;
   end;
 
 implementation
 
+constructor TPayment.Create;
+begin
+  inherited Create;
+
+  // Базова ініціалізація
+  PaymentType := ptCashless;      // Найпоширеніший тип за замовчуванням
+  CashlessSubType := cstOtherCashless;
+  Code := -1;                      // -1 = "автовизначити з PaymentType"
+  Value := 0;
+  LabelText := '';
+  ProviderType := '';
+
+  // Карткові поля
+  CardMask := '';
+  BankName := '';
+  AuthCode := '';
+  RRN := '';
+  PaymentSystem := '';
+
+  // Фінансові
+  Commission := 0;
+  CommissionValue := 0;
+  Currency := 'UAH';
+  ExchangeRate := 1.0;
+
+  // Статуси
+  IsOffline := False;
+  SignatureRequired := False;
+  IsPrepaid := False;
+end;
 
 constructor TAuthInfo.Create;
 begin
@@ -1260,36 +1305,6 @@ begin
   inherited Destroy;
 end;
 
-destructor TPayment.Destroy;
-begin
-  // Вивільняємо всі рядкові поля
-  LabelText := '';
-  PLabel := '';
-  ProviderType := '';
-  CardMask := '';
-  BankName := '';
-  AuthCode := '';
-  RRN := '';
-  PaymentSystem := '';
-  OwnerName := '';
-  Terminal := '';
-  AcquirerAndSeller := '';
-  Acquiring := '';
-  ReceiptNo := '';
-  TapxphoneTerminal := '';
-  Currency := '';
-  ForeignCurrency := '';
-  OfflineId := '';
-  AdditionalInfo := '';
-  ResponseCode := '';
-  Status := '';
-  CardType := '';
-  IssuerCountry := '';
-  CardBrand := '';
-  LoyaltyProgram := '';
-
-  inherited Destroy;
-end;
 
 { TCustomSettings }
 destructor TCustomSettings.Destroy;
@@ -1694,11 +1709,36 @@ begin
                 Payments[I].PaymentType := ptCashless
               else if TempStr = 'CASH' then
                 Payments[I].PaymentType := ptCash
+              else if TempStr = 'OTHER' then
+                Payments[I].PaymentType := ptOther
               else
                 Payments[I].PaymentType := ptCashless; // За замовчуванням
 
+              // Визначення підтипу за label (зворотна сумісність)
               Payments[I].LabelText := PaymentObj.Get('label', '');
-              Payments[I].PLabel := PaymentObj.Get('label', '');
+              if Pos('Картка', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstCard
+              else if Pos('Інтернет банкінг', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstInternetBanking
+              else if Pos('Інтернет еквайринг', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstInternetAcquiring
+              else if Pos('LiqPay', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstLiqPay
+              else if Pos('Mono', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstMono
+              else if Pos('WayForPay', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstWayForPay
+              else if Pos('NovaPay', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstNovaPay
+              else if Pos('EasyPay', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstEasyPay
+              else if Pos('Подарунковий сертифікат', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstGiftCertificate
+              else if Pos('Талон', Payments[I].LabelText) > 0 then
+                Payments[I].CashlessSubType := cstToken
+              else
+                Payments[I].CashlessSubType := cstOtherCashless;
+
               Payments[I].Value := PaymentObj.Get('value', 0);
               Payments[I].Code := PaymentObj.Get('code', 0);
               Payments[I].PawnshopIsReturn := PaymentObj.Get('pawnshop_is_return', False);
@@ -2305,9 +2345,60 @@ begin
   case APaymentType of
     ptCash: Result := 'CASH';
     ptCashless: Result := 'CASHLESS';
-    ptCard: Result := 'CASHLESS'; // Картка теж безготівка
+    ptOther: Result := 'OTHER';
   else
     Result := 'CASH';
+  end;
+end;
+
+function TReceiptWebAPI.CashlessSubTypeToString(ASubType: TCashlessSubType): string;
+begin
+  case ASubType of
+    cstCard:              Result := 'CARD';
+    cstInternetBanking:   Result := 'INTERNET_BANKING';
+    cstInternetAcquiring: Result := 'INTERNET_ACQUIRING';
+    cstLiqPay:            Result := 'LIQPAY';
+    cstMono:              Result := 'MONO';
+    cstWayForPay:         Result := 'WAYFORPAY';
+    cstNovaPay:           Result := 'NOVAPAY';
+    cstEasyPay:           Result := 'EASYPAY';
+    cstGiftCertificate:   Result := 'GIFT_CERTIFICATE';
+    cstToken:             Result := 'TOKEN';
+    cstTransferNNPP:      Result := 'TRANSFER_NNPP';
+    cstTransferPTKS:      Result := 'TRANSFER_PTKS';
+    cstCurrentAccount:    Result := 'CURRENT_ACCOUNT';
+    cstElectronicMoney:   Result := 'ELECTRONIC_MONEY';
+    cstDigitalMoney:      Result := 'DIGITAL_MONEY';
+    cstCryptocurrency:    Result := 'CRYPTOCURRENCY';
+    cstOtherCashless:     Result := 'OTHER_CASHLESS';
+  else
+    Result := 'OTHER_CASHLESS';
+  end;
+end;
+
+function TReceiptWebAPI.GetCashlessLabel(ASubType: TCashlessSubType;
+  const AIntegratorName: string): string;
+begin
+  case ASubType of
+    cstCard:              Result := 'Картка';
+    cstInternetBanking:   Result := 'Інтернет банкінг';
+    cstInternetAcquiring: Result := 'Інтернет еквайринг';
+    cstLiqPay:            Result := 'LiqPay';
+    cstMono:              Result := 'Mono';
+    cstWayForPay:         Result := 'WayForPay';
+    cstNovaPay:           Result := 'NovaPay';
+    cstEasyPay:           Result := 'EasyPay';
+    cstGiftCertificate:   Result := 'Подарунковий сертифікат';
+    cstToken:             Result := 'Талон';
+    cstTransferNNPP:      Result := 'Переказ через ННПП';
+    cstTransferPTKS:      Result := 'Переказ через ПТКС банку';
+    cstCurrentAccount:    Result := 'З поточного рахунку';
+    cstElectronicMoney:   Result := 'Електронні гроші';
+    cstDigitalMoney:      Result := 'Цифрові гроші';
+    cstCryptocurrency:    Result := 'Криптовалюта';
+    cstOtherCashless:     Result := 'Інше';
+  else
+    Result := 'Безготівковий розрахунок';
   end;
 end;
 
@@ -2712,9 +2803,23 @@ begin
             PaymentItem := TJSONObject.Create;
             try
               PaymentItem.Add('type', PaymentTypeToString(AReceipt.Payments[I].PaymentType));
-              PaymentItem.Add('label', AReceipt.Payments[I].LabelText);
+              // ВИПРАВЛЕНО: Якщо label порожній, формуємо його з підтипу
+              if AReceipt.Payments[I].LabelText <> '' then
+                PaymentItem.Add('label', AReceipt.Payments[I].LabelText)
+              else if AReceipt.Payments[I].PaymentType = ptCashless then
+                PaymentItem.Add('label', GetCashlessLabel(AReceipt.Payments[I].CashlessSubType));
               PaymentItem.Add('value', AReceipt.Payments[I].Value);
-              PaymentItem.Add('code', AReceipt.Payments[I].Code);
+              // ВИПРАВЛЕНО: Автоматичне встановлення коду, якщо не задано
+              if AReceipt.Payments[I].Code >= 0 then
+                PaymentItem.Add('code', AReceipt.Payments[I].Code)
+              else
+              begin
+                case AReceipt.Payments[I].PaymentType of
+                  ptCash: PaymentItem.Add('code', 0);
+                  ptCashless: PaymentItem.Add('code', 1);
+                  ptOther: PaymentItem.Add('code', 2);
+                end;
+              end;
               PaymentItem.Add('pawnshop_is_return', AReceipt.Payments[I].PawnshopIsReturn);
 
               if AReceipt.Payments[I].ProviderType <> '' then
@@ -2817,19 +2922,37 @@ var
   PaymentItem: TJSONObject;
   TaxArray: TJSONArray;
   i: Integer;
-  PaymentTypeStr: string;
+  PaymentTypeStr, ReceiptTypeStr: string;
 begin
   JsonData := TJSONObject.Create;
 
   try
-    // ОБОВ'ЯЗКОВІ ПОЛЯ згідно з документацією
+    // Обов'язкові поля
     JsonData.Add('id', AReceipt.Id);
     JsonData.Add('cashier_name', AReceipt.CashierName);
     JsonData.Add('departament', AReceipt.Departament);
 
-    // OrderId - string (не обов'язково UUID)
+    // OrderId: null замість порожнього рядка
     if AReceipt.OrderId <> '' then
-      JsonData.Add('order_id', AReceipt.OrderId);
+      JsonData.Add('order_id', AReceipt.OrderId)
+    else
+      JsonData.Add('order_id', TJSONNull.Create);
+
+    // Previous receipt ID (для ланцюжка чеків)
+    if AReceipt.PreviousReceiptId <> '' then
+      JsonData.Add('previous_receipt_id', AReceipt.PreviousReceiptId);
+
+    // Тип чека: конвертація enum -> string
+    case AReceipt.ReceiptType of
+      rtSell:           ReceiptTypeStr := 'SELL';
+      rtReturn:         ReceiptTypeStr := 'RETURN';
+      rtServiceIn:      ReceiptTypeStr := 'SERVICE_IN';
+      rtServiceOut:     ReceiptTypeStr := 'SERVICE_OUT';
+      rtCashWithdrawal: ReceiptTypeStr := 'CASH_WITHDRAWAL';
+    else
+      ReceiptTypeStr := 'SELL';
+    end;
+    JsonData.Add('type', ReceiptTypeStr);
 
     // Goods array
     GoodsArray := TJSONArray.Create;
@@ -2845,24 +2968,27 @@ begin
         GoodData.Add('name', AReceipt.Goods[i].Good.Name);
         GoodData.Add('price', AReceipt.Goods[i].Good.Price);
 
-        // Barcode - опціонально
+        // Barcode - опціонально, лише якщо це реальний EAN-13
         if AReceipt.Goods[i].Good.Barcode <> '' then
           GoodData.Add('barcode', AReceipt.Goods[i].Good.Barcode);
 
-        // Tax
+        // Tax - масив податкових груп
         if Length(AReceipt.Goods[i].Good.Tax) > 0 then
         begin
           TaxArray := TJSONArray.Create;
-          TaxArray.Add(AReceipt.Goods[i].Good.Tax[0]); // Беремо перший податок
+          TaxArray.Add(AReceipt.Goods[i].Good.Tax[0]);
           GoodData.Add('tax', TaxArray);
         end;
 
         GoodItem.Add('good', GoodData);
-
-        // Good item fields
         GoodItem.Add('good_id', AReceipt.Goods[i].GoodId);
         GoodItem.Add('quantity', AReceipt.Goods[i].Quantity);
         GoodItem.Add('sum', AReceipt.Goods[i].Sum);
+
+        // Якщо є знижка, передаємо total_sum
+        if AReceipt.Goods[i].TotalSum <> AReceipt.Goods[i].Sum then
+          GoodItem.Add('total_sum', AReceipt.Goods[i].TotalSum);
+
         GoodItem.Add('is_return', AReceipt.Goods[i].IsReturn);
 
         GoodsArray.Add(GoodItem);
@@ -2878,19 +3004,25 @@ begin
       begin
         PaymentItem := TJSONObject.Create;
 
-        // Конвертація типу оплати в string
+        // Конвертація типу оплати
         case AReceipt.Payments[i].PaymentType of
-          ptCash: PaymentTypeStr := 'CASH';
+          ptCash:     PaymentTypeStr := 'CASH';
           ptCashless: PaymentTypeStr := 'CASHLESS';
-          // ptCard: PaymentTypeStr := 'CARD'; // Закоментуйте, якщо ptCard не існує
+          ptOther:    PaymentTypeStr := 'OTHER';
         else
-          PaymentTypeStr := 'CASH'; // За замовчуванням
+          PaymentTypeStr := 'CASHLESS';
         end;
 
         PaymentItem.Add('type', PaymentTypeStr);
         PaymentItem.Add('value', AReceipt.Payments[i].Value);
-        PaymentItem.Add('label', AReceipt.Payments[i].LabelText);
-        PaymentItem.Add('code', AReceipt.Payments[i].Code);
+
+        // Label - обов'язковий для безготівки (рядок 19 Наказу 601)
+        if AReceipt.Payments[i].LabelText <> '' then
+          PaymentItem.Add('label', AReceipt.Payments[i].LabelText);
+
+        // Code - лише якщо не 0 (Integer, не string!)
+        if AReceipt.Payments[i].Code <> 0 then
+          PaymentItem.Add('code', AReceipt.Payments[i].Code);
 
         PaymentsArray.Add(PaymentItem);
       end;
@@ -2901,19 +3033,23 @@ begin
     JsonData.Add('total_sum', AReceipt.TotalSum);
     JsonData.Add('total_payment', AReceipt.TotalPayment);
 
-    // Rounding
-    if AReceipt.Rounding then
-      JsonData.Add('rounding', AReceipt.Rounding);
+    // Rounding - ціле число в КОПІЙКАХ (не Boolean!)
+    if AReceipt.RoundingSum <> 0 then
+      JsonData.Add('rounding', AReceipt.RoundingSum);
 
-    // Header/Footer - опціонально
+    // Rest (решта) - опціонально, але рекомендовано
+    if AReceipt.Rest > 0 then
+      JsonData.Add('rest', AReceipt.Rest);
+
+    // Header/Footer
     if AReceipt.Header <> '' then
       JsonData.Add('header', AReceipt.Header);
     if AReceipt.Footer <> '' then
       JsonData.Add('footer', AReceipt.Footer);
 
-    Log('=== ФІНАЛЬНИЙ JSON ЗГІДНО З ДОКУМЕНТАЦІЄЮ ===');
+    Log('=== ФІНАЛЬНИЙ JSON ===');
     Log(JsonData.AsJSON);
-    Log('============================================');
+    Log('======================');
 
     Result := JsonData;
 
@@ -3028,6 +3164,26 @@ begin
   Result := TPayment.Create;
   Result.PaymentType := APaymentType;
   Result.Value := AValue;
+  Result.CashlessSubType := cstOtherCashless; // За замовчуванням
+
+  // Автоматичне встановлення коду та label
+  case APaymentType of
+    ptCash:
+      begin
+        Result.Code := 0;
+        Result.LabelText := 'Готівка';
+      end;
+    ptCashless:
+      begin
+        Result.Code := 1;
+        Result.LabelText := 'Безготівковий розрахунок';
+      end;
+    ptOther:
+      begin
+        Result.Code := 2;
+        Result.LabelText := 'Інше';
+      end;
+  end;
 end;
 
 
@@ -3104,8 +3260,8 @@ end;
 
 
 
-
-function TReceiptWebAPI.GetCashRegisterStatusCurl(const ACashRegisterId: string; out AResponse: string; out ACashRegisterStatus: TCashRegisterStatus): Boolean;
+function TReceiptWebAPI.GetCashRegisterStatusCurl(const ACashRegisterId: string;
+  out AResponse: string; out ACashRegisterStatus: TCashRegisterStatus): Boolean;
 var
   Command: string;
 begin
@@ -3113,18 +3269,9 @@ begin
   AResponse := '';
   ACashRegisterStatus := nil;
 
-  // Перевіряємо чи токен дійсний, якщо ні - оновлюємо
-  if not IsTokenValid then
-  begin
-    // ЄДИНИЙ спосіб отримати новий токен - повторний логін
-    if not LoginCurl(FUsername, FPassword, AResponse) then
-    begin
-      Log('Потрібен повторний вхід: ' + AResponse);
-      Exit;
-    end;
-  end;
+  if not EnsureTokenValid(AResponse) then
+    Exit;
 
-  // Перевіряємо вхідні параметри
   if ACashRegisterId = '' then
   begin
     AResponse := 'Cash register ID is empty';
@@ -3132,44 +3279,35 @@ begin
   end;
 
   try
-    // Формуємо curl команду
-    Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" -H "X-Client-Version: %s" -H "Authorization: Bearer %s" "%s/api/v1/cash-registers/%s"',
-         [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, ACashRegisterId]);
+    Command := Format('-X GET -H "Accept: application/json" -H "X-Client-Name: %s" ' +
+                     '-H "X-Client-Version: %s" -H "Authorization: Bearer %s" ' +
+                     '"%s/api/v1/cash-registers/%s"',
+      [FClientName, FClientVersion, FAuthInfo.Token, FBaseURL, ACashRegisterId]);
 
-    // Виконуємо curl команду
-    Result := ExecuteCurlCommand(Command,'GetCashRegisterStatusCurl' , 'GET /api/v1/cash-registers/',AResponse);
+    Result := ExecuteCurlCommand(Command, 'GetCashRegisterStatusCurl',
+                                'GET /api/v1/cash-registers/', AResponse);
 
-    // Парсимо відповідь
+    if Result then
+    begin
+      Log('Отримано відповідь сервера, парсимо...');
+      Result := ParseCashRegisterStatus(AResponse, ACashRegisterStatus);
+
+      if Result and Assigned(ACashRegisterStatus) then
+      begin
+        if (FCurrentCashRegisterId = '') or (FCurrentCashRegisterId <> ACashRegisterStatus.Id) then
+        begin
+          FCurrentCashRegisterId := ACashRegisterStatus.Id;
+          Log('Встановлено ID каси: ' + FCurrentCashRegisterId);
+        end;
+      end;
 
       if Result then
-      begin
-        Log('Отримано відповідь сервера, парсимо...');
-        Result := ParseCashRegisterStatus(AResponse, ACashRegisterStatus);
-
-        // Після успішного отримання статусу каси
-        if Result and Assigned(ACashRegisterStatus) then
-        begin
-          // ЗБЕРІГАЄМО ID КАСИ ДЛЯ ПОДАЛЬШИХ ОПЕРАЦІЙ (якщо ще не встановлено або змінився)
-          if (FCurrentCashRegisterId = '') or (FCurrentCashRegisterId <> ACashRegisterStatus.Id) then
-          begin
-            FCurrentCashRegisterId := ACashRegisterStatus.Id;
-            Log('Встановлено ID каси: ' + FCurrentCashRegisterId);
-          end
-          else
-          begin
-            Log('ID каси вже встановлено: ' + FCurrentCashRegisterId);
-          end;
-        end;
-
-        if Result then
-          Log('Парсинг статусу каси успішний')
-        else
-          Log('Помилка парсингу статусу каси');
-      end
+        Log('Парсинг статусу каси успішний')
       else
-      begin
-        Log('Помилка виконання curl команди: ' + AResponse);
-      end;
+        Log('Помилка парсингу статусу каси');
+    end
+    else
+      Log('Помилка виконання curl команди: ' + AResponse);
 
   except
     on E: Exception do
@@ -3311,19 +3449,41 @@ end;
 
 
 
-function TReceiptWebAPI.BuildOpenShiftJsonData(const AShiftId, AFiscalCode, AFiscalDate: string): TJSONObject;
+function TReceiptWebAPI.BuildOpenShiftJsonData(const AShiftId, AFiscalCode, AFiscalDate: string;
+  const AOfflineMode: Boolean): TJSONObject;
 begin
   Result := TJSONObject.Create;
   try
-    // Додаємо тільки ID зміни (якщо потрібно)
+    // ID зміни (обов'язково)
     if AShiftId = '' then
       Result.Add('id', GenerateUUID)
     else
       Result.Add('id', AShiftId);
 
-    Result.Add('offline_mode', True); // Тільки один раз
-    if AFiscalDate <> '' then
-      Result.Add('fiscal_date', AFiscalDate);
+    // Параметр offline_mode передаємо ТІЛЬКИ якщо це необхідно (наприклад, для тестової каси)
+    // Для реальної каси сервер сам визначить режим, тому не додаємо поле взагалі
+    if AOfflineMode then
+    begin
+      Result.Add('offline_mode', True);
+      Log('BuildOpenShiftJsonData: Додано offline_mode=true');
+
+      // Для тестової каси в офлайні передаємо fiscal_code/fiscal_date
+      if AFiscalCode <> '' then
+      begin
+        Result.Add('fiscal_code', AFiscalCode);
+        Log('BuildOpenShiftJsonData: Додано fiscal_code=' + AFiscalCode);
+      end;
+
+      if AFiscalDate <> '' then
+      begin
+        Result.Add('fiscal_date', AFiscalDate);
+        Log('BuildOpenShiftJsonData: Додано fiscal_date=' + AFiscalDate);
+      end;
+    end
+    else
+    begin
+      Log('BuildOpenShiftJsonData: offline_mode НЕ додано (реальна каса або онлайн-режим)');
+    end;
 
   except
     on E: Exception do
@@ -3430,7 +3590,6 @@ end;
 
 
 
-
 function TReceiptWebAPI.OpenShiftCurl(const AShiftId, AFiscalCode, AFiscalDate: string;
   out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
 var
@@ -3439,48 +3598,31 @@ var
   StringList: TStringList;
   CashRegisterStatus: TCashRegisterStatus;
   UseOfflineMode: Boolean;
-  InitialBalance: Integer;
+  WaitCount: Integer;
 begin
-  Log('OpenShiftCurl:---старт--------------------------------');
-  // Ініціалізація змінних
+  Log('OpenShiftCurl: --- старт ---');
   Result := False;
   AResponse := '';
   AShiftStatus := nil;
   UseOfflineMode := False;
-  InitialBalance := 0; // Значення за замовчуванням
   JsonData := nil;
   StringList := TStringList.Create;
   CashRegisterStatus := nil;
 
   try
-    // Перевірка, чи ініціалізовано ID каси
+    // 1. Перевірка ID каси
     if FCurrentCashRegisterId = '' then
     begin
-      AResponse := 'ID каси не ініціалізовано. Спочатку викличте InitializeCashRegister або InitializeFirstCashRegister';
+      AResponse := 'ID каси не ініціалізовано. Спочатку викличте InitializeCashRegister';
       Log(AResponse);
       Exit;
     end;
 
-    // Перевірка дійсності токена
-    if not IsTokenValid then
-    begin
-      // ЄДИНИЙ спосіб отримати новий токен - повторний логін
-      Log('Токен недійсний, оновлюємо...');
-      if not LoginCurl(FUsername, FPassword, AResponse) then
-      begin
-       AResponse := 'Token expired and refresh failed: ' + AResponse;
-       Log('Помилка оновлення токена: ' + AResponse);
-       Log('Потрібен повторний вхід: ' + AResponse);
-       Exit;
-      end;
-      Log('Токен успішно оновлено');
-    end
-    else
-    begin
-      Log('Токен дійсний');
-    end;
+    // 2. Перевірка токена
+    if not EnsureTokenValid(AResponse) then
+      Exit;
 
-    // Перевірка режиму роботи каси - ОБОВ'ЯЗКОВО офлайн-режим
+    // 3. Отримання статусу каси
     Log('Перевірка режиму роботи каси...');
     if not GetCashRegisterStatusCurl(FCurrentCashRegisterId, AResponse, CashRegisterStatus) then
     begin
@@ -3489,204 +3631,233 @@ begin
     end;
 
     try
-      if Assigned(CashRegisterStatus) then
-      begin
-        Log('Поточний режим каси - OfflineMode=' +
-            BoolToStr(CashRegisterStatus.OfflineMode, True) +
-            ', StayOffline=' + BoolToStr(CashRegisterStatus.StayOffline, True));
-
-        // КРИТИЧНА ПЕРЕВІРКА: каса повинна бути в офлайн-режимі
-        if not CashRegisterStatus.OfflineMode then
-        begin
-          AResponse := 'Неможливо відкрити зміну. Каса не знаходиться в офлайн-режимі. ' +
-                       'Поточний режим: Online. Зміну можна відкривати тільки в офлайн-режимі.';
-          Log(AResponse);
-          Exit;
-        end;
-
-        // Додаткова перевірка: каса повинна бути налаштована на офлайн-роботу
-        if not CashRegisterStatus.StayOffline then
-        begin
-          AResponse := 'Неможливо відкрити зміну. Каса не налаштована на постійну роботу в офлайн-режимі. ' +
-                       'Параметр StayOffline = False. Зміну можна відкривати тільки при налаштуванні на офлайн-роботу.';
-          Log(AResponse);
-          Exit;
-        end;
-
-        // Якщо обидві умови виконані - використовуємо офлайн-режим
-        UseOfflineMode := True;
-        Log('Каса готова для роботи в офлайн-режимі - продовжуємо відкриття зміни');
-      end
-      else
+      if not Assigned(CashRegisterStatus) then
       begin
         AResponse := 'Не вдалося отримати дані статусу каси';
         Log(AResponse);
         Exit;
       end;
+
+      Log('Поточний режим каси:');
+      Log(' - IsTest: ' + BoolToStr(CashRegisterStatus.IsTest, True));
+      Log(' - OfflineMode: ' + BoolToStr(CashRegisterStatus.OfflineMode, True));
+      Log(' - StayOffline: ' + BoolToStr(CashRegisterStatus.StayOffline, True));
+      Log(' - ShiftStatus: ' + CashRegisterStatus.ShiftStatus);
+
+      // 4. Якщо зміна вже відкрита – використовуємо її
+      if CashRegisterStatus.ShiftStatus = 'OPENED' then
+      begin
+        Log('ℹ️ Зміна вже відкрита! Оновлюємо поточний ID зміни.');
+        FCurrentShiftId := CashRegisterStatus.Id;
+        SaveShiftToFile(FCurrentShiftId);
+        // Повертаємо статус (UI оновить самостійно)
+        AShiftStatus := TShiftStatus.Create;
+        AShiftStatus.Id := FCurrentShiftId;
+        AShiftStatus.Status := 'OPENED';
+        Result := True;
+        Exit;
+      end;
+
+      // 5. Логіка визначення необхідності офлайн-режиму та go-offline
+      if CashRegisterStatus.OfflineMode then
+      begin
+        Log('Каса в офлайн-режимі.');
+
+        // Якщо офлайн був автоматичним (stay_offline = false) – потрібно ініціювати офлайн інтеграцією
+        if not CashRegisterStatus.StayOffline then
+        begin
+          Log('⚠️ Офлайн-перехід був автоматичним (stay_offline=false).');
+          Log('Необхідно виконати go-offline з коректною fiscal_date.');
+
+          // Викликаємо go-offline (без параметрів)
+          if not GoOfflineCurl(AResponse) then
+          begin
+            Log('❌ Не вдалося виконати go-offline: ' + AResponse);
+            Exit;
+          end;
+
+          // Чекаємо, поки stay_offline стане true (тобто офлайн буде ініційовано)
+          Log('Очікуємо зміни stay_offline на true...');
+          WaitCount := 0;
+          repeat
+            Sleep(3000);
+            Inc(WaitCount);
+            if Assigned(CashRegisterStatus) then
+              FreeAndNil(CashRegisterStatus);
+            if not GetCashRegisterStatusCurl(FCurrentCashRegisterId, AResponse, CashRegisterStatus) then
+            begin
+              AResponse := 'Помилка повторної перевірки статусу: ' + AResponse;
+              Log(AResponse);
+              Exit;
+            end;
+            Log('Повторна перевірка: StayOffline=' + BoolToStr(CashRegisterStatus.StayOffline, True));
+          until (CashRegisterStatus.StayOffline) or (WaitCount > 20); // до 60 секунд
+
+          if not Assigned(CashRegisterStatus) or not CashRegisterStatus.StayOffline then
+          begin
+            AResponse := 'Таймаут очікування ініціації офлайну (60 сек)';
+            Log(AResponse);
+            Exit;
+          end;
+          Log('✅ Офлайн успішно ініційовано інтеграцією (stay_offline=true).');
+        end
+        else
+        begin
+          Log('ℹ️ Офлайн ініційовано інтеграцією (stay_offline=true).');
+        end;
+
+        // Тепер ми в офлайні, ініційованому інтеграцією.
+        // Визначаємо, чи потрібно передавати offline_mode у запиті на відкриття зміни.
+        if CashRegisterStatus.IsTest then
+        begin
+          UseOfflineMode := True;
+          Log('Тестова каса – відкриваємо зміну в офлайн-режимі з передачею offline_mode.');
+        end
+        else
+        begin
+          UseOfflineMode := False;
+          Log('Реальна каса – відкриваємо зміну без параметра offline_mode (сервер визначить).');
+        end;
+      end
+      else
+      begin
+        // Каса в онлайні – відкриваємо звичайну зміну
+        Log('Каса в онлайн-режимі. Відкриваємо зміну без offline_mode.');
+        UseOfflineMode := False;
+      end;
+
+      // 6. Підготовка JSON
+      Log('Формування JSON даних для відкриття зміни...');
+      JsonData := BuildOpenShiftJsonData(AShiftId, AFiscalCode, AFiscalDate, UseOfflineMode);
+
+      JsonString := JsonData.AsJSON;
+      Log('JSON дані: ' + Copy(JsonString, 1, 300) + '...');
+
+      // 7. Створення тимчасового файлу та виконання запиту
+      TempFile := GetTempDir + 'open_shift_' + GenerateUUID + '.json';
+      Log('Тимчасовий файл: ' + TempFile);
+
+      StringList.Text := JsonString;
+      StringList.SaveToFile(TempFile);
+
+      try
+        Command := Format('-X POST -H "accept: application/json" -H "X-Client-Name: %s" ' +
+                         '-H "X-Client-Version: %s" -H "X-License-Key: %s" ' +
+                         '-H "Authorization: Bearer %s" -H "Content-Type: application/json" ' +
+                         '--data-binary "@%s" "%s/api/v1/shifts"',
+          [FClientName, FClientVersion, FLicenseKey, FAuthInfo.Token, TempFile, FBaseURL]);
+
+        Result := ExecuteCurlCommand(Command, 'OpenShiftCurl', 'POST /api/v1/shifts', AResponse);
+
+        Log('Результат виконання: ' + BoolToStr(Result, True));
+        Log('Відповідь сервера: ' + Copy(AResponse, 1, 500));
+
+        if Result then
+        begin
+          if CheckResponseForErrors(AResponse) then
+          begin
+            Log('Сервер повернув помилку: ' + AResponse);
+            Result := False;
+          end
+          else
+          begin
+            Log('Парсинг відповіді...');
+            Result := ParseShiftStatus(AResponse, AShiftStatus);
+
+            if Result and Assigned(AShiftStatus) then
+            begin
+              Log('Статус зміни: ' + AShiftStatus.Status);
+
+              case AShiftStatus.Status of
+                'OPENED':
+                  begin
+                    Log('Зміна відкрита.');
+                    if Assigned(AShiftStatus.Balance) then
+                    begin
+                      FCurrentBalance := AShiftStatus.Balance.Balance;
+                      Log('Баланс: ' + Format('%.2f грн', [FCurrentBalance / 100]));
+                    end
+                    else
+                      FCurrentBalance := 0;
+
+                    FCurrentShiftId := AShiftStatus.Id;
+                    SaveShiftToFile(FCurrentShiftId);
+                    FLastBalanceUpdate := Now;
+                    Log('Зміна успішно відкрита.');
+                  end;
+
+                'CREATED':
+                  begin
+                    Log('Запит створено, очікуємо підтвердження...');
+                    FCurrentShiftId := AShiftStatus.Id;
+                    SaveShiftToFile(FCurrentShiftId);
+
+                    Result := WaitForShiftStatus(FCurrentShiftId, 'OPENED', AResponse, AShiftStatus, 60);
+                    if Result and Assigned(AShiftStatus) then
+                    begin
+                      if Assigned(AShiftStatus.Balance) then
+                      begin
+                        FCurrentBalance := AShiftStatus.Balance.Balance;
+                        Log('Баланс після очікування: ' + Format('%.2f грн', [FCurrentBalance / 100]));
+                      end;
+                      Log('Зміна відкрита успішно.');
+                    end
+                    else
+                      Log('Помилка відкриття: ' + AResponse);
+                  end;
+
+                'CLOSED', 'ERROR':
+                  begin
+                    Log('Зміна в статусі ' + AShiftStatus.Status + ' – неможливо відкрити.');
+                    Result := False;
+                  end;
+              else
+                Log('Невідомий статус: ' + AShiftStatus.Status);
+                Result := False;
+              end;
+            end
+            else
+            begin
+              Log('Помилка парсингу відповіді.');
+              if Assigned(AShiftStatus) then
+                FreeAndNil(AShiftStatus);
+            end;
+          end;
+        end
+        else
+        begin
+          Log('Помилка виконання curl: ' + AResponse);
+        end;
+
+      finally
+        if FileExists(TempFile) then
+        begin
+          DeleteFile(TempFile);
+          Log('Тимчасовий файл видалено.');
+        end;
+      end;
+
     finally
       if Assigned(CashRegisterStatus) then
         FreeAndNil(CashRegisterStatus);
     end;
 
-    // Підготовка JSON даних для відкриття зміни
-    Log('Формування JSON даних для відкриття зміни...');
-    JsonData := BuildOpenShiftJsonData(AShiftId, AFiscalCode, '');
-
-    // Встановлюємо офлайн-режим явно
-    JsonData.Add('offline_mode', UseOfflineMode);
-
-    // Додаємо початковий баланс, якщо він відомий
-    if InitialBalance > 0 then
-      JsonData.Add('initial_balance', InitialBalance);
-
-    JsonString := JsonData.AsJSON;
-
-    // Логуємо JSON (обмежуємо логування через конфіденційність даних)
-    Log('JSON дані: ' + Copy(JsonString, 1, 200) + '...');
-
-    // Створення тимчасового файлу для JSON даних
-    TempFile := GetTempDir + 'open_shift_' + GenerateUUID + '.json';
-    Log('Тимчасовий файл: ' + TempFile);
-
-    StringList.Text := JsonString;
-    StringList.SaveToFile(TempFile);
-
-    try
-      // Формування curl команди з правильним URL та заголовками
-      Command := Format('-X POST -H "accept: application/json" -H "X-Client-Name: %s" ' +
-                       '-H "X-Client-Version: %s" -H "X-License-Key: %s" ' +
-                       '-H "Authorization: Bearer %s" -H "Content-Type: application/json" ' +
-                       '--data-binary "@%s" "%s/api/v1/shifts"',
-        [FClientName, FClientVersion, FLicenseKey, FAuthInfo.Token, TempFile, FBaseURL]);
-
-      //Log('OpenShiftCurl: Виконуємо команду: curl ' + Command);
-
-      // Виконання curl команди
-      Result := ExecuteCurlCommand(Command,'OpenShiftCurl','POST /api/v1/shifts', AResponse);
-
-      // Детальне логування результату виконання
-      Log('Результат виконання: ' + BoolToStr(Result, True));
-      Log('Відповідь сервера: ' + Copy(AResponse, 1, 500));
-
-      if Result then
-      begin
-        // Перевіряємо, чи відповідь містить помилки
-        if CheckResponseForErrors(AResponse) then
-        begin
-          Log('Сервер повернув помилку: ' + AResponse);
-          Result := False;
-        end
-        else
-        begin
-          Log('Парсинг відповіді сервера...');
-
-          // ВИПРАВЛЕННЯ: Використовуємо ParseShiftStatus для коректного парсингу балансу
-          Result := ParseShiftStatus(AResponse, AShiftStatus);
-
-          if Result and Assigned(AShiftStatus) then
-          begin
-            Log('Успішно розпарсено статус зміни: ' + AShiftStatus.Status);
-
-            // Обробка різних статусів зміни
-            case AShiftStatus.Status of
-              'OPENED':
-                begin
-                  Log('Зміна відкрита, оновлюємо дані...');
-
-                  // ВИПРАВЛЕННЯ: Оновлюємо баланс з відповіді сервера
-                  if Assigned(AShiftStatus.Balance) then
-                  begin
-                    FCurrentBalance := AShiftStatus.Balance.Balance;
-                    Log('Баланс оновлено: ' +
-                        Format('%.2f грн', [FCurrentBalance / 100]));
-                  end
-                  else
-                  begin
-                    Log('Інформація про баланс відсутня у відповіді');
-                    FCurrentBalance := 0; // Резервне значення
-                  end;
-
-                  // Зберігаємо ID зміни для подальшого відстеження
-                  FCurrentShiftId := AShiftStatus.Id;
-                  SaveShiftToFile(FCurrentShiftId);
-                  FLastBalanceUpdate := Now;
-
-                  Log('Зміна успішно відкрита в офлайн-режимі');
-                  Log(FormatBalanceInfo(AShiftStatus.Balance));
-                end;
-
-              'CREATED':
-                begin
-                  Log('Запит на відкриття офлайн-зміни успішний! Очікуємо підтвердження...');
-                  // Зберігаємо ID зміни для подальшого відстеження
-                  FCurrentShiftId := AShiftStatus.Id;
-                  SaveShiftToFile(FCurrentShiftId);
-
-                  // Запускаємо відстеження статусу з таймаутом 60 секунд
-                  Log('Запуск відстеження статусу зміни...');
-                  Result := WaitForShiftStatus(FCurrentShiftId, 'OPENED', AResponse, AShiftStatus, 60);
-
-                  if Result and Assigned(AShiftStatus) then
-                  begin
-                    // ВИПРАВЛЕННЯ: Оновлюємо баланс після успішного відкриття
-                    if Assigned(AShiftStatus.Balance) then
-                    begin
-                      FCurrentBalance := AShiftStatus.Balance.Balance;
-                      Log('Баланс оновлено після очікування: ' +
-                          Format('%.2f грн', [FCurrentBalance / 100]));
-                    end;
-                    Log('Зміна успішно відкрита в офлайн-режимі');
-                  end
-                  else
-                    Log('Помилка відкриття зміни: ' + AResponse);
-                end;
-
-              'CLOSED', 'ERROR':
-                begin
-                  Log('Зміна в статусі ' + AShiftStatus.Status + ' - не можна відкрити');
-                  Result := False;
-                end;
-            else
-              Log('Невідомий статус зміни: ' + AShiftStatus.Status);
-              Result := False;
-            end;
-          end
-          else
-          begin
-            Log('Помилка парсингу відповіді сервера');
-            if Assigned(AShiftStatus) then
-              FreeAndNil(AShiftStatus);
-          end;
-        end;
-      end
-      else
-      begin
-        Log('Помилка виконання curl команди: ' + AResponse);
-      end;
-    finally
-      // Очищення тимчасового файлу
-      if FileExists(TempFile) then
-      begin
-        DeleteFile(TempFile);
-        Log('Тимчасовий файл видалено');
-      end;
-    end;
-
   except
     on E: Exception do
     begin
-      // Обробка винятків
-      AResponse := 'CURL command error: ' + E.Message;
+      AResponse := 'CURL error: ' + E.Message;
       Log('Виняток: ' + E.Message);
       Result := False;
-
-      // Звільнення ресурсів у разі винятку
       if Assigned(AShiftStatus) then
         FreeAndNil(AShiftStatus);
     end;
   end;
-end;
 
+  if Assigned(JsonData) then
+    FreeAndNil(JsonData);
+  if Assigned(StringList) then
+    FreeAndNil(StringList);
+end;
 
 
 function TReceiptWebAPI.GetShiftStatusCurl(const AShiftId: string; out AResponse: string; out AShiftStatus: TShiftStatus): Boolean;
@@ -5309,56 +5480,111 @@ var
   Command: string;
   JsonParser: TJSONParser;
   JsonData: TJSONObject;
+  TempFile: string;
+  StringList: TStringList;
+  DummyStatus: TCashRegisterStatus;
 begin
   Result := False;
   AResponse := '';
+  JsonData := nil;
+  DummyStatus := nil;
 
-  if not IsTokenValid then
-  begin
-    // ЄДИНИЙ спосіб отримати новий токен - повторний логін
-    if not LoginCurl(FUsername, FPassword, AResponse) then
-    begin
-      Log('Потрібен повторний вхід: ' + AResponse);
-      Exit;
-    end;
-  end;
+  if not EnsureTokenValid(AResponse) then
+    Exit;
 
+  StringList := TStringList.Create;
   try
-    Command := Format('-X POST -H "accept: application/json" -H "X-Client-Name: %s" -H "X-Client-Version: %s" -H "X-License-Key: %s" -H "Authorization: Bearer %s" -H "Content-Type: application/json" -d ''{}'' "%s/api/v1/cash-registers/go-online"',
-       [FClientName, FClientVersion, FLicenseKey, FAuthInfo.Token, FBaseURL]);
+    TempFile := GetTempDir + 'go_online_' + GenerateUUID + '.json';
+    StringList.Text := '{}';
 
-    Log('GoOnlineCurl: Виконуємо команду: curl ' + Command);
-    Result := ExecuteCurlCommand(Command,'GoOnlineCurl','POST /api/v1/cash-registers/go-online', AResponse);
-
-    if Result then
-    begin
-      // Парсимо відповідь для перевірки статусу
-      JsonParser := TJSONParser.Create(AResponse, [joUTF8]);
-      try
-        JsonData := JsonParser.Parse as TJSONObject;
-        Result := JsonData.Get('status', '') = 'ok';
-
-        if Result then
-          Log('Команда переходу в онлайн-режим успішно відправлена через curl')
-        else
-          Log('Невірний статус у відповіді curl: ' + AResponse);
-      finally
-        JsonData.Free;
+    try
+      StringList.SaveToFile(TempFile);
+    except
+      on E: Exception do
+      begin
+        AResponse := 'Помилка створення тимчасового файлу: ' + E.Message;
+        Log('GoOnlineCurl: ' + AResponse);
+        Exit;
       end;
-    end
-    else
+    end;
+
+    try
+      Command := Format('-X POST -H "accept: application/json" -H "X-Client-Name: %s" ' +
+                       '-H "X-Client-Version: %s" -H "X-License-Key: %s" ' +
+                       '-H "Authorization: Bearer %s" -H "Content-Type: application/json" ' +
+                       '--data-binary "@%s" "%s/api/v1/cash-registers/go-online"',
+        [FClientName, FClientVersion, FLicenseKey, FAuthInfo.Token, TempFile, FBaseURL]);
+
+      Log('GoOnlineCurl: Виконуємо команду: curl ' + Command);
+      Result := ExecuteCurlCommand(Command, 'GoOnlineCurl',
+                                  'POST /api/v1/cash-registers/go-online', AResponse);
+
+      if Result then
+      begin
+        JsonParser := TJSONParser.Create(AResponse, [joUTF8]);
+        try
+          JsonData := JsonParser.Parse as TJSONObject;
+
+          if Assigned(JsonData) then
+          begin
+            Result := JsonData.Get('status', '') = 'ok';
+
+            if Result then
+            begin
+              Log('✅ Команда переходу в онлайн-режим успішно відправлена');
+              FLastBalanceUpdate := 0; // примусове оновлення балансу
+              Log('GoOnlineCurl: Скинуто FLastBalanceUpdate');
+            end
+            else
+              Log('⚠️ Невірний статус у відповіді: ' + AResponse);
+          end
+          else
+          begin
+            Log('GoOnlineCurl: Parse повернув nil');
+            Result := False;
+          end;
+        finally
+          if Assigned(JsonData) then
+            JsonData.Free;
+        end;
+      end
+      else
+      begin
+        Log('❌ Помилка виконання curl: ' + AResponse);
+      end;
+
+    finally
+      if FileExists(TempFile) then
+        DeleteFile(TempFile);
+    end;
+
+    // Оновлення статусу каси для UI
+    if Result and (FCurrentCashRegisterId <> '') then
     begin
-      Log('Помилка виконання curl команди переходу: ' + AResponse);
+      Log('GoOnlineCurl: Оновлення статусу каси...');
+      if GetCashRegisterStatusCurl(FCurrentCashRegisterId, AResponse, DummyStatus) then
+      begin
+        if Assigned(DummyStatus) then
+        begin
+          Log('GoOnlineCurl: Статус оновлено — OfflineMode=' +
+              BoolToStr(DummyStatus.OfflineMode, True));
+          FreeAndNil(DummyStatus);
+        end;
+      end
+      else
+        Log('⚠️ GoOnlineCurl: Не вдалося оновити статус: ' + AResponse);
     end;
 
   except
     on E: Exception do
     begin
-      AResponse := 'CURL command error: ' + E.Message;
+      AResponse := 'CURL error: ' + E.Message;
       Log('GoOnlineCurl: Виняток: ' + E.Message);
       Result := False;
     end;
   end;
+
+  StringList.Free;
 end;
 
 function TReceiptWebAPI.WaitForOnlineMode(out AResponse: string; ATimeoutSec: Integer = 300): Boolean;
@@ -5383,11 +5609,10 @@ begin
     Inc(CheckCount);
     Log('Перевірка статусу каси #' + IntToStr(CheckCount));
 
-    // Перевіряємо статус каси
     if not GetCashRegisterStatusCurl(FCurrentCashRegisterId, AResponse, CashRegisterStatus) then
     begin
       Log('Помилка перевірки статусу каси: ' + AResponse);
-      Sleep(60000); // Зачекати 1 хвилину перед наступною спробою
+      Sleep(60000);
       Continue;
     end;
 
@@ -5397,7 +5622,7 @@ begin
         Log('Статус каси: OfflineMode=' + BoolToStr(CashRegisterStatus.OfflineMode, True) +
             ', StayOffline=' + BoolToStr(CashRegisterStatus.StayOffline, True));
 
-        // Перевіряємо, чи каса в онлайн-режимі
+        // Якщо каса в онлайні – успіх
         if not CashRegisterStatus.OfflineMode then
         begin
           Result := True;
@@ -5405,8 +5630,7 @@ begin
           Exit;
         end;
 
-        // Якщо каса ще в офлайн-режимі, відправляємо команду go-online
-        // (не частіше ніж раз на 2 хвилини через rate limit)
+        // Якщо ще в офлайні – надсилаємо команду go-online з дотриманням rate-limit (2 хвилини)
         if (MinutesBetween(Now, LastGoOnlineTime) >= 2) or (LastGoOnlineTime = 0) then
         begin
           Log('Відправляємо команду переходу в онлайн-режим...');
@@ -5416,13 +5640,11 @@ begin
             Log('Команда успішно відправлена, очікуємо...');
           end
           else
-          begin
             Log('Помилка відправки команди: ' + AResponse);
-          end;
         end
         else
         begin
-          Log('Очікуємо перед наступною командою (rate limit 2 хвилини)');
+          Log('Очікуємо перед наступною командою (rate-limit 2 хвилини)');
         end;
 
       finally
@@ -5430,16 +5652,16 @@ begin
       end;
     end;
 
-    // Зачекати перед наступною перевіркою (1 хвилина)
+    // Затримка перед наступною перевіркою (1 хвилина)
     Sleep(60000);
     ElapsedSeconds := SecondsBetween(Now, StartTime);
-    Log('Очікування... (' + IntToStr(ElapsedSeconds) + 'с/' +
-        IntToStr(ATimeoutSec) + 'с)');
+    Log('Очікування... (' + IntToStr(ElapsedSeconds) + 'с/' + IntToStr(ATimeoutSec) + 'с)');
   end;
 
   Log('Час очікування переходу в онлайн-режим вийшов');
   AResponse := 'Таймаут очікування переходу каси в онлайн-режим';
 end;
+
 
 function TReceiptWebAPI.BuildGoOfflineJsonData: TJSONObject;
 begin
@@ -5457,7 +5679,6 @@ begin
 end;
 
 
-
 function TReceiptWebAPI.GoOfflineCurl(out AResponse: string): Boolean;
 var
   Command: string;
@@ -5465,76 +5686,109 @@ var
   JsonData: TJSONObject;
   TempFile: string;
   StringList: TStringList;
+  DummyStatus: TCashRegisterStatus;
 begin
   Result := False;
   AResponse := '';
+  JsonData := nil;
+  DummyStatus := nil;
 
-  if not IsTokenValid then
-  begin
-    // ЄДИНИЙ спосіб отримати новий токен - повторний логін
-    if not LoginCurl(FUsername, FPassword, AResponse) then
-    begin
-      Log('Потрібен повторний вхід: ' + AResponse);
-      Exit;
-    end;
-  end;
+  if not EnsureTokenValid(AResponse) then
+    Exit;
 
   StringList := TStringList.Create;
   try
-    // Створюємо тимчасовий файл з правильним JSON
     TempFile := GetTempDir + 'go_offline_' + GenerateUUID + '.json';
-    StringList.Text := '{}'; // Правильний JSON без зайвих лапок
-    StringList.SaveToFile(TempFile);
+    StringList.Text := '{}';
 
     try
-      // ВИПРАВЛЕНА команда - використовуємо файл замість -d '{}'
+      StringList.SaveToFile(TempFile);
+    except
+      on E: Exception do
+      begin
+        AResponse := 'Помилка створення файлу: ' + E.Message;
+        Log('GoOfflineCurl: ' + AResponse);
+        Exit;
+      end;
+    end;
+
+    try
       Command := Format('-X POST -H "accept: application/json" -H "X-Client-Name: %s" ' +
                        '-H "X-Client-Version: %s" -H "X-License-Key: %s" ' +
                        '-H "Authorization: Bearer %s" -H "Content-Type: application/json" ' +
                        '--data-binary "@%s" "%s/api/v1/cash-registers/go-offline"',
         [FClientName, FClientVersion, FLicenseKey, FAuthInfo.Token, TempFile, FBaseURL]);
 
-      Log('GoOfflineCurl: Виконуємо команду: curl ' + Command);
-      Result := ExecuteCurlCommand(Command,'GoOfflineCurl','POST /api/v1/cash-registers/go-offline', AResponse);
+      Log('GoOfflineCurl: Виконуємо: curl ' + Command);
+      Result := ExecuteCurlCommand(Command, 'GoOfflineCurl',
+                                  'POST /api/v1/cash-registers/go-offline', AResponse);
 
       if Result then
       begin
-        // Парсимо відповідь для перевірки статусу
         JsonParser := TJSONParser.Create(AResponse, [joUTF8]);
         try
           JsonData := JsonParser.Parse as TJSONObject;
-          Result := JsonData.Get('status', '') = 'ok';
 
-          if Result then
+          if Assigned(JsonData) then
           begin
-            Log('Команда переходу в офлайн-режим успішно відправлена через curl');
-            // ... інший код
+            Result := JsonData.Get('status', '') = 'ok';
+
+            if Result then
+            begin
+              Log('✅ Перехід в офлайн успішний');
+              FLastBalanceUpdate := 0;
+              Log('GoOfflineCurl: FLastBalanceUpdate скинуто');
+            end
+            else
+              Log('Невірний статус: ' + AResponse);
           end
           else
           begin
-            Log('Невірний статус у відповіді curl: ' + AResponse);
+            Log('GoOfflineCurl: Parse = nil');
+            Result := False;
           end;
         finally
-          JsonData.Free;
+          if Assigned(JsonData) then
+            JsonData.Free;
         end;
       end
       else
       begin
-        Log('Помилка виконання curl команди переходу в офлайн: ' + AResponse);
+        Log('Помилка curl: ' + AResponse);
       end;
+
     finally
       if FileExists(TempFile) then
         DeleteFile(TempFile);
     end;
 
+    // Оновлення статусу каси для UI
+    if Result and (FCurrentCashRegisterId <> '') then
+    begin
+      Log('GoOfflineCurl: Оновлення статусу каси...');
+      if GetCashRegisterStatusCurl(FCurrentCashRegisterId, AResponse, DummyStatus) then
+      begin
+        if Assigned(DummyStatus) then
+        begin
+          Log('GoOfflineCurl: Статус оновлено — OfflineMode=' +
+              BoolToStr(DummyStatus.OfflineMode, True));
+          FreeAndNil(DummyStatus);
+        end;
+      end
+      else
+        Log('⚠️ GoOfflineCurl: Не вдалося оновити статус: ' + AResponse);
+    end;
+
   except
     on E: Exception do
     begin
-      AResponse := 'CURL command error: ' + E.Message;
+      AResponse := 'CURL error: ' + E.Message;
       Log('GoOfflineCurl: Виняток: ' + E.Message);
       Result := False;
     end;
   end;
+
+  StringList.Free;
 end;
 
 function TReceiptWebAPI.WaitForOfflineMode(out AResponse: string; ATimeoutSec: Integer = 300): Boolean;
@@ -5707,205 +5961,22 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.BuildCashOperationJsonData(AOperationType: TCashOperationType; AAmount: Integer; ADescription: string): TJSONObject;
+
+
+
+function TReceiptWebAPI.CashInCurl(AAmount: Integer; ADescription: string;
+  out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
 begin
-  Result := TJSONObject.Create;
-  try
-    Result.Add('type', CashOperationTypeToString(AOperationType));
-    Result.Add('amount', AAmount);
+  Result := CashIncome(AAmount, ADescription, AResponse, AReceiptResponse);
+end;
 
-    if ADescription <> '' then
-      Result.Add('description', ADescription);
-
-    // Додаємо обов'язкові поля для чека
-    Result.Add('id', GenerateUUID);
-    Result.Add('cashier_name', 'Касир'); // Замініть на реальне ім'я касира
-    Result.Add('department', '1'); // Замініть на реальний відділ
-
-  except
-    on E: Exception do
-    begin
-      Result.Free;
-      raise;
-    end;
-  end;
+function TReceiptWebAPI.CashOutCurl(AAmount: Integer; ADescription: string;
+  out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
+begin
+  Result := CashOutcome(AAmount, ADescription, AResponse, AReceiptResponse);
 end;
 
 
-function TReceiptWebAPI.CashInCurl(AAmount: Integer; ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
-begin
-  Result := CashOperationCurl(cotCashIn, AAmount, ADescription, AResponse, AReceiptResponse);
-end;
-
-
-function TReceiptWebAPI.CashOutCurl(AAmount: Integer; ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
-begin
-  Result := CashOperationCurl(cotCashOut, AAmount, ADescription, AResponse, AReceiptResponse);
-end;
-
-
-
-function TReceiptWebAPI.CashOperationCurl(AOperationType: TCashOperationType; AAmount: Integer; ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
-var
-  JsonData: TJSONObject;
-  Command, JsonString, TempFile, OperationTypeStr: string;
-  StringList: TStringList;
-begin
-  Result := False;
-  AReceiptResponse := nil;
-
-  // Перевіряємо чи токен дійсний
-  if not IsTokenValid then
-  begin
-    // ЄДИНИЙ спосіб отримати новий токен - повторний логін
-    if not LoginCurl(FUsername, FPassword, AResponse) then
-    begin
-      Log('Потрібен повторний вхід: ' + AResponse);
-      Exit;
-    end;
-  end;
-
-  // Перевіряємо наявність ID каси
-  if FCurrentCashRegisterId = '' then
-  begin
-    AResponse := 'Cash register ID not set';
-    Log('CashOperationCurl: ' + AResponse);
-    Exit;
-  end;
-
-  JsonData := nil;
-  StringList := TStringList.Create;
-  try
-    // Визначаємо тип операції
-    case AOperationType of
-      cotCashIn: OperationTypeStr := 'CASH_IN';
-      cotCashOut: OperationTypeStr := 'CASH_OUT';
-    else
-      OperationTypeStr := 'CASH_IN';
-    end;
-
-    // Формуємо JSON з даними операції згідно PHP SDK
-    JsonData := TJSONObject.Create;
-    try
-      // Основні поля згідно PHP SDK
-      JsonData.Add('value', AAmount);
-      JsonData.Add('currency', 'UAH');
-
-      if ADescription <> '' then
-        JsonData.Add('description', ADescription)
-      else
-        JsonData.Add('description', 'Готівкова операція');
-
-      JsonData.Add('type', OperationTypeStr);
-
-      // Додаткові поля для коректної роботи
-      JsonData.Add('id', GenerateUUID);
-      JsonData.Add('cashier_name', 'Касир'); // Замініть на реальне ім'я
-      JsonData.Add('department', '1');
-
-      JsonString := JsonData.AsJSON;
-      Log('CashOperationCurl: JSON data: ' + Copy(JsonString, 1, 200) + '...');
-
-    finally
-      JsonData.Free;
-    end;
-
-    // Створюємо тимчасовий файл для JSON даних
-    TempFile := GetTempDir + 'cash_operation_' + GenerateUUID + '.json';
-    StringList.Text := JsonString;
-    StringList.SaveToFile(TempFile);
-
-    try
-      // ВИПРАВЛЕНИЙ URL - використовуємо ендпоінт згідно PHP SDK
-      Command := Format('-X POST -H "Content-Type: application/json" ' +
-                       '-H "Accept: application/json" ' +
-                       '-H "X-Client-Name: %s" ' +
-                       '-H "X-Client-Version: %s" ' +
-                       '-H "Authorization: Bearer %s" ' +
-                       '--data-binary "@%s" ' +
-                       '"%s/api/cash-registers/%s/cash"',
-        [FClientName, FClientVersion, FAuthInfo.Token, TempFile, FBaseURL, FCurrentCashRegisterId]);
-
-      Log('CashOperationCurl: Виконуємо команду: curl ' + Command);
-
-      // Виконуємо curl команду
-      Result := ExecuteCurlCommand(Command, 'CashOperationCurl', 'POST /api/cash-registers/CashRegisterID/cash', AResponse);
-
-      // Аналізуємо відповідь
-      if Result then
-      begin
-        Log('CashOperationCurl: Відповідь сервера: ' + Copy(AResponse, 1, 300));
-
-        // Перевіряємо наявність помилок
-        if CheckResponseForErrors(AResponse) then
-        begin
-          Log('CashOperationCurl: Сервер повернув помилку: ' + Copy(AResponse, 1, 200));
-          Result := False;
-        end
-        else
-        begin
-          // Спробуємо парсити відповідь як чек
-          AReceiptResponse := TReceiptResponse.Create;
-          Result := AReceiptResponse.ParseFromJSON(AResponse, Self);
-
-          if not Result then
-          begin
-            // Якщо не вдалося розпарсити як чек, перевіряємо інші формати
-            if (Pos('"id"', AResponse) > 0) and (Pos('"type"', AResponse) > 0) then
-            begin
-              // Можливо це відповідь про успішну операцію
-              Log('CashOperationCurl: Готівкова операція успішна (не чек)');
-              Result := True;
-            end
-            else
-            begin
-              Log('CashOperationCurl: Не вдалося розпарсити відповідь');
-              FreeAndNil(AReceiptResponse);
-            end;
-          end
-          else
-          begin
-            Log('CashOperationCurl: Операція успішна, отримано чек');
-          end;
-
-          // Після успішної операції оновлюємо баланс
-          if Result then
-          begin
-            FLastBalanceUpdate := 0;
-            GetCurrentBalance(AResponse);
-          end;
-        end;
-      end
-      else
-      begin
-        Log('CashOperationCurl: Помилка виконання curl команди: ' + AResponse);
-
-        // Альтернативна спроба - інший ендпоінт
-        Log('CashOperationCurl: Спробуємо альтернативний ендпоінт...');
-        Result := TryAlternativeCashOperation(AOperationType, AAmount, ADescription, AResponse, AReceiptResponse);
-      end;
-
-    finally
-      // Видаляємо тимчасовий файл
-      if FileExists(TempFile) then
-      begin
-        DeleteFile(TempFile);
-        Log('CashOperationCurl: Тимчасовий файл видалено');
-      end;
-    end;
-
-  except
-    on E: Exception do
-    begin
-      AResponse := 'CURL command error: ' + E.Message;
-      Log('CashOperationCurl: Виняток: ' + E.Message);
-      Result := False;
-
-      if Assigned(AReceiptResponse) then
-        FreeAndNil(AReceiptResponse);
-    end;
-  end;
-end;
 
 // Додайте цей метод до TReceiptWebAPI
 function TReceiptWebAPI.GetShiftBalance(out ABalance: Integer; out AResponse: string): Boolean;
@@ -6407,7 +6478,7 @@ var
   ShouldRetry: Boolean;
   ErrorMsg: string;
 begin
-  // ДЕТАЛЬНЕ ЛОГУВАННЯ СТВОРЕНОГО З БАЗИ ЧЕКА
+  // Детальне логування чека (залишено без змін)
   Log('=== ДЕТАЛЬНА ІНФОРМАЦІЯ ПРО ЧЕК ПЕРЕД ВІДПРАВКОЮ ===');
   Log('Загальна сума: ' + IntToStr(AReceipt.TotalSum) + ' коп');
   Log('Кількість товарів: ' + IntToStr(Length(AReceipt.Goods)));
@@ -6416,46 +6487,26 @@ begin
   for i := 0 to High(AReceipt.Goods) do
   begin
     if Assigned(AReceipt.Goods[i]) and Assigned(AReceipt.Goods[i].Good) then
-    begin
       Log(Format('Товар %d: %s - Ціна: %d коп, Кількість: %d, Сума: %d коп', [
         i, AReceipt.Goods[i].Good.Name,
         AReceipt.Goods[i].Good.Price,
         AReceipt.Goods[i].Quantity,
         AReceipt.Goods[i].TotalSum
-      ]));
-    end
+      ]))
     else
-    begin
       Log(Format('❌ ПОМИЛКА: Товар %d не ініціалізований', [i]));
-    end;
   end;
 
   for i := 0 to High(AReceipt.Payments) do
   begin
     if Assigned(AReceipt.Payments[i]) then
-    begin
       Log(Format('Оплата %d: Тип=%d, Сума=%d коп', [
         i, Ord(AReceipt.Payments[i].PaymentType), AReceipt.Payments[i].Value
-      ]));
-    end
+      ]))
     else
-    begin
       Log(Format('❌ ПОМИЛКА: Оплата %d не ініціалізована', [i]));
-    end;
   end;
   Log('=== КІНЕЦЬ ДЕТАЛЬНОЇ ІНФОРМАЦІЇ ===');
-
-  // Перевірка критичних полів чека
-  Log('=== ПЕРЕВІРКА КРИТИЧНИХ ПОЛІВ ЧЕКА ===');
-  Log('OrderId: ' + AReceipt.OrderId);
-  Log('RelatedReceiptId: ' + AReceipt.RelatedReceiptId);
-  Log('PreviousReceiptId: ' + AReceipt.PreviousReceiptId);
-  Log('Context: ' + AReceipt.Context);
-  Log('CashierName: ' + AReceipt.CashierName);
-  Log('Departament: ' + AReceipt.Departament);
-  Log('TotalSum: ' + IntToStr(AReceipt.TotalSum));
-  Log('TotalPayment: ' + IntToStr(AReceipt.TotalPayment));
-  Log('=== КІНЕЦЬ ПЕРЕВІРКИ ===');
 
   Result := False;
   AReceiptResponse := nil;
@@ -6464,7 +6515,6 @@ begin
 
   try
     try
-      // 1. Перевірка вхідних параметрів
       if not Assigned(AReceipt) then
       begin
         AResponse := 'Помилка: AReceipt не ініціалізований';
@@ -6472,7 +6522,6 @@ begin
         Exit;
       end;
 
-      // 2. Валідація структури чека (API-рівень)
       if not ValidateReceiptStructure(AReceipt, ValidationError) then
       begin
         AResponse := 'Помилка валідації: ' + ValidationError;
@@ -6480,22 +6529,9 @@ begin
         Exit;
       end;
 
-      // 3. Перевірка токена авторизації
-      if not IsTokenValid then
-      begin
-        Log('⚠️ Токен недійсний, спроба оновлення...');
-        if not LoginCurl(FUsername, FPassword, AResponse) then
-        begin
-          Log('❌ Потрібен повторний вхід: ' + AResponse);
-          Exit;
-        end
-        else
-        begin
-          Log('✅ Токен успішно оновлено');
-        end;
-      end;
+      if not EnsureTokenValid(AResponse) then
+        Exit;
 
-      // 4. Перевірка наявності ID каси
       if FCurrentCashRegisterId = '' then
       begin
         AResponse := 'Cash register ID not set';
@@ -6503,11 +6539,9 @@ begin
         Exit;
       end;
 
-      // 5. Вибір ендпоінта
       Endpoint := GetReceiptEndpoint(AReceipt.ReceiptType);
       Log(Format('Відправка чека типу %s', [ReceiptTypeToString(AReceipt.ReceiptType)]));
 
-      // 6. Побудова JSON згідно з документацією Checkbox API
       try
         JsonData := BuildJsonDataCorrected(AReceipt);
         if not Assigned(JsonData) then
@@ -6528,7 +6562,6 @@ begin
         end;
       end;
 
-      // 7. Створення тимчасового файлу
       TempFile := GetTempDir + 'receipt_' + GenerateUUID + '.json';
 
       try
@@ -6544,7 +6577,6 @@ begin
         end;
       end;
 
-      // 8. Формування та виконання curl команди
       try
         Command := Format('-X POST -H "Content-Type: application/json" ' +
                          '-H "Accept: application/json" ' +
@@ -6554,49 +6586,54 @@ begin
                          '--data-binary "@%s" ' +
                          '"%s%s"',
           [FClientName, FClientVersion, FAuthInfo.Token, TempFile, FBaseURL, Endpoint]);
+
         Log('Full JSON request: ' + JsonString);
         Log('Виконання curl команди: ' + Copy(Command, 1, 200) + '...');
 
-        // 9. Виконання запиту
         Result := ExecuteCurlCommand(Command, 'SendReceiptCurl', Endpoint, AResponse);
 
-        // 10. Аналіз відповіді API
         if Result then
         begin
           Log('✅ Отримано відповідь від сервера');
 
-          // Спочатку перевіряємо на помилки валідації
           if CheckResponseForErrors(AResponse) then
           begin
-            // Аналізуємо відповідь на предмет специфічних помилок
+            // Спеціальна обробка помилки вичерпання офлайн-кодів
+            if Pos('offline_codes_absent', AResponse) > 0 then
+            begin
+              Log('⚠️ OFFLINE_CODES_ABSENT: Вичерпано офлайн-коди');
+              AResponse := 'Неможливо створити чек в офлайн-режимі: вичерпано офлайн-коди.' + sLineBreak +
+                           sLineBreak +
+                           'Рішення:' + sLineBreak +
+                           '1. Натисніть кнопку "Онлайн" для переходу в онлайн-режим' + sLineBreak +
+                           '2. Повторіть створення чека' + sLineBreak +
+                           sLineBreak +
+                           'Або зверніться до адміністратора для отримання нових офлайн-кодів.';
+              Result := False;
+              Exit;
+            end;
+
             ProcessReceiptResponse(AResponse, ShouldRetry, ErrorMsg);
 
-            // ВИДАЛЕНО: автоматичне виправлення помилок податкових груп
-            // ЗАМІСТЬ ЦЬОГО: просто констатуємо факт помилки
             if ErrorMsg <> '' then
             begin
               AResponse := ErrorMsg;
 
-              // Для помилок податкових груп - зупиняємо процес без повторних спроб
               if Pos('tax.group', AResponse) > 0 then
               begin
-                Log('❌ КРИТИЧНА ПОМИЛКА ПОДАТКОВИХ ГРУП: Неправильні налаштування податкових груп');
-                Log('📋 Деталі помилки: ' + AResponse);
-                Log('💡 НЕОБХІДНІ ДІЇ КОРИСТУВАЧА:');
+                Log('❌ КРИТИЧНА ПОМИЛКА ПОДАТКОВИХ ГРУП');
+                Log('📋 Деталі: ' + AResponse);
+                Log('💡 НЕОБХІДНІ ДІЇ:');
                 Log('   1. Увійти на веб-портал Checkbox');
-                Log('   2. Налаштувати податкові ставки відповідно до вимог API');
-                Log('   3. Оновити налаштування товарів у локальній базі даних');
-                Log('   4. Перезапустити програму після налаштувань');
-                Log('📍 Доступні податкові групи в API: [8, "З"]');
+                Log('   2. Налаштувати податкові ставки');
+                Log('   3. Оновити налаштування товарів у локальній базі');
+                Log('   4. Перезапустити програму');
                 Result := False;
-                Exit; // Зупиняємо процес - це системна помилка
+                Exit;
               end;
 
               if ShouldRetry then
-              begin
-                Log('🔄 Помилка виправлена - дозволено повторну спробу');
-                // Result залишаємо False, щоб викликаючий код міг повторити спробу
-              end
+                Log('🔄 Помилка виправлена - дозволено повторну спробу')
               else
               begin
                 Log('❌ Помилка API (без повторної спроби): ' + AResponse);
@@ -6605,23 +6642,21 @@ begin
             end
             else
             begin
-              // Стандартна обробка помилок
               ParseAPIError(AResponse, AResponse);
               Log('❌ Помилка API: ' + AResponse);
               Result := False;
 
-              // Детальний аналіз типових помилок
               if Pos('order_id', AResponse) > 0 then
                 Log('💡 Рекомендація: Не передавайте order_id або використовуйте UUID');
               if Pos('context', AResponse) > 0 then
                 Log('💡 Рекомендація: Не передавайте context');
               if Pos('uuid', AResponse) > 0 then
-                Log('💡 Рекомендація: Перевірте формат UUID полів');
+                Log('💡 Рекомендація: Перевірте формат UUID');
             end;
           end
           else
           begin
-            // УСПІШНА ВІДПОВІДЬ - парсимо результат
+            // Успішна відповідь
             try
               AReceiptResponse := TReceiptResponse.Create;
               Result := AReceiptResponse.ParseFromJSON(AResponse, Self);
@@ -6631,12 +6666,9 @@ begin
                 Log(Format('✅ Чек успішно створено. ID: %s, Фіскальний: %s',
                   [AReceiptResponse.Id, AReceiptResponse.FiscalCode]));
 
-                // Оновлення балансу в API (не в БД!)
                 FLastBalanceUpdate := 0;
                 if not ForceBalanceUpdate(AResponse) then
-                begin
                   Log('⚠️ Не вдалося оновити баланс, але чек створено');
-                end;
               end
               else
               begin
@@ -6646,7 +6678,7 @@ begin
             except
               on E: Exception do
               begin
-                Log('❌ Виняток при парсингу відповіді: ' + E.Message);
+                Log('❌ Виняток при парсингу: ' + E.Message);
                 FreeAndNil(AReceiptResponse);
                 Result := False;
               end;
@@ -6655,13 +6687,9 @@ begin
         end
         else
         begin
-          Log('❌ Помилка виконання curl команди: ' + AResponse);
-
-          // Аналіз мережевих помилок
+          Log('❌ Помилка виконання curl: ' + AResponse);
           if IsNetworkError(AResponse) then
-          begin
-            Log('🌐 Мережева помилка - перевірте підключення до інтернету');
-          end;
+            Log('🌐 Мережева помилка - перевірте підключення');
         end;
 
       except
@@ -6674,7 +6702,6 @@ begin
       end;
 
     finally
-      // Очищення тимчасового файлу
       if FileExists(TempFile) then
       begin
         try
@@ -6682,9 +6709,7 @@ begin
           Log('Тимчасовий файл видалено: ' + TempFile);
         except
           on E: Exception do
-          begin
             Log('⚠️ Не вдалося видалити тимчасовий файл: ' + E.Message);
-          end;
         end;
       end;
     end;
@@ -6692,28 +6717,20 @@ begin
   except
     on E: Exception do
     begin
-      AResponse := 'Критичний виняток у SendReceiptCurl: ' + E.Message;
+      AResponse := 'Критичний виняток: ' + E.Message;
       Log('❌ SendReceiptCurl: Критичний виняток: ' + E.Message);
-      Log('Тип винятку: ' + E.ClassName);
+      Log('Тип: ' + E.ClassName);
       Result := False;
-
-      // Гарантоване звільнення пам'яті
       if Assigned(AReceiptResponse) then
         FreeAndNil(AReceiptResponse);
     end;
   end;
 
-  // Фінальне логування результату
   if Result then
-  begin
-    Log('🎉 SendReceiptCurl завершено УСПІШНО');
-  end
+    Log('🎉 SendReceiptCurl завершено УСПІШНО')
   else
-  begin
     Log('💥 SendReceiptCurl завершено З ПОМИЛКОЮ: ' + Copy(AResponse, 1, 200));
-  end;
 
-  // Остаточне очищення
   if Assigned(JsonData) then
     FreeAndNil(JsonData);
   if Assigned(StringList) then
@@ -6762,12 +6779,6 @@ begin
   end;
 end;
 
-(*
-function TReceiptWebAPI.ForceBalanceUpdate(out AResponse: string): Integer;
-begin
-  FLastBalanceUpdate := 0;
-  Result := GetCurrentBalance(AResponse);
-end;*)
 
 function TReceiptWebAPI.ForceBalanceUpdate(out AResponse: string): Boolean;
 var
@@ -6781,209 +6792,183 @@ begin
   end;
 end;
 
-function TReceiptWebAPI.TryAlternativeCashOperation(AOperationType: TCashOperationType;
-  AAmount: Integer; ADescription: string; out AResponse: string;
-  out AReceiptResponse: TReceiptResponse): Boolean;
-var
-  JsonData: TJSONObject;
-  Command, JsonString, TempFile, OperationTypeStr: string;
-  StringList: TStringList;
-begin
-  Result := False;
-  AReceiptResponse := nil;
-
-  StringList := TStringList.Create;
-  try
-    // Визначаємо тип операції
-    case AOperationType of
-      cotCashIn: OperationTypeStr := 'CASH_IN';
-      cotCashOut: OperationTypeStr := 'CASH_OUT';
-    else
-      OperationTypeStr := 'CASH_IN';
-    end;
-
-    // Альтернативний формат JSON
-    JsonData := TJSONObject.Create;
-    try
-      JsonData.Add('amount', AAmount);
-      JsonData.Add('operation_type', OperationTypeStr);
-      JsonData.Add('description', ADescription);
-      JsonData.Add('currency', 'UAH');
-
-      JsonString := JsonData.AsJSON;
-    finally
-      JsonData.Free;
-    end;
-
-    TempFile := GetTempDir + 'cash_alt_' + GenerateUUID + '.json';
-    StringList.Text := JsonString;
-    StringList.SaveToFile(TempFile);
-
-    try
-      // Альтернативний ендпоінт
-      Command := Format('-X POST -H "Content-Type: application/json" ' +
-                       '-H "Accept: application/json" ' +
-                       '-H "Authorization: Bearer %s" ' +
-                       '--data-binary "@%s" ' +
-                       '"%s/api/v1/cash-operations"',
-        [FAuthInfo.Token, TempFile, FBaseURL]);
-
-      Log('TryAlternativeCashOperation: Виконуємо альтернативну команду: curl ' + Command);
-
-      Result := ExecuteCurlCommand(Command, 'TryAlternativeCashOperation', 'POST /api/v1/cash-operations', AResponse);
-
-      if Result then
-      begin
-        Log('TryAlternativeCashOperation: Альтернативна операція успішна');
-        FLastBalanceUpdate := 0;
-        GetCurrentBalance(AResponse);
-      end;
-
-    finally
-      if FileExists(TempFile) then
-        DeleteFile(TempFile);
-    end;
-
-  finally
-    StringList.Free;
-  end;
-end;
-
 
 
 function TReceiptWebAPI.CashIncome(AAmount: Integer; ADescription: string;
   out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
 begin
-  Result := ServiceCashOperation('SERVICE_IN', AAmount, ADescription, AResponse, AReceiptResponse);
+  Log('CashIncome: внесення готівки ' + FloatToStrF(AAmount/100, ffNumber, 10, 2) + ' грн');
+  Result := ServiceCashOperation('SERVICE_IN', AAmount, '', AResponse, AReceiptResponse);
 end;
 
 function TReceiptWebAPI.CashOutcome(AAmount: Integer; ADescription: string;
   out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
 begin
-  Result := ServiceCashOperation('SERVICE_OUT', AAmount, ADescription, AResponse, AReceiptResponse);
+  Log('CashOutcome: винесення готівки ' + FloatToStrF(AAmount/100, ffNumber, 10, 2) + ' грн');
+  Result := ServiceCashOperation('SERVICE_OUT', AAmount, '', AResponse, AReceiptResponse);
 end;
 
 function TReceiptWebAPI.ServiceCashOperation(AOperationType: string; AAmount: Integer;
   ADescription: string; out AResponse: string; out AReceiptResponse: TReceiptResponse): Boolean;
 var
-  JsonData, PaymentObj: TJSONObject;
+  JsonData: TJSONObject;
+  PaymentObj: TJSONObject;
   Command, JsonString, TempFile: string;
   StringList: TStringList;
+  ActualAmount: Integer;
+  IsServiceOut: Boolean;
 begin
   Result := False;
   AReceiptResponse := nil;
+  AResponse := '';
 
-  if not IsTokenValid then
+  // --- ВАЛІДАЦІЯ ---
+  if not EnsureTokenValid(AResponse) then
+    Exit;
+
+  if FCurrentCashRegisterId = '' then
   begin
-    if not LoginCurl(FUsername, FPassword, AResponse) then
-    begin
-      Log('Потрібен повторний вхід: ' + AResponse);
-      Exit;
-    end;
+    AResponse := 'ID каси не встановлено. Спочатку викличте InitializeCashRegister';
+    Log('❌ ServiceCashOperation: ' + AResponse);
+    Exit;
   end;
 
+  // Визначаємо тип операції та коригуємо суму
+  IsServiceOut := (AOperationType = 'SERVICE_OUT') or (AOperationType = 'CASH_OUT');
+
+  if IsServiceOut then
+  begin
+    // Для винесення готівки сума від'ємна
+    ActualAmount := -Abs(AAmount);
+    Log('ServiceCashOperation: SERVICE_OUT (винесення), сума = ' + IntToStr(ActualAmount) + ' коп');
+  end
+  else
+  begin
+    // Для внесення готівки сума додатна
+    ActualAmount := Abs(AAmount);
+    Log('ServiceCashOperation: SERVICE_IN (внесення), сума = ' + IntToStr(ActualAmount) + ' коп');
+  end;
+
+  // --- ФОРМУВАННЯ JSON ---
   JsonData := nil;
   StringList := TStringList.Create;
   try
-    // Формуємо JSON згідно документації API
     JsonData := TJSONObject.Create;
     try
-      // Обов'язкові поля
+      // Обов'язкове поле: id чека (UUID v4)
       JsonData.Add('id', GenerateUUID);
+      Log('ServiceCashOperation: ID чека = ' + JsonData.Get('id', ''));
 
-      // Блок payment
+      // Обов'язкове поле: payment (ОБ'ЄКТ, не масив!)
       PaymentObj := TJSONObject.Create;
       PaymentObj.Add('type', 'CASH');
-      PaymentObj.Add('value', AAmount);
+      PaymentObj.Add('value', ActualAmount);  // ← одне поле value, без дублювання!
       JsonData.Add('payment', PaymentObj);
 
-      // Опціональні поля
-      if ADescription <> '' then
-        JsonData.Add('description', ADescription);
-
-      // Для SERVICE_OUT потрібно вказувати негативну суму
-      if AOperationType = 'SERVICE_OUT' then
-      begin
-        PaymentObj.Add('value', -AAmount);
-      end;
+      Log('ServiceCashOperation: payment.value = ' + IntToStr(ActualAmount));
 
       JsonString := JsonData.AsJSON;
-      Log('ServiceCashOperation: JSON data: ' + Copy(JsonString, 1, 200) + '...');
+      Log('ServiceCashOperation: JSON = ' + JsonString);
+
     finally
-      JsonData.Free;
+      // PaymentObj звільняється автоматично як частина JsonData
+      // Не викликаємо PaymentObj.Free!
     end;
 
-    TempFile := GetTempDir + 'service_cash_op_' + GenerateUUID + '.json';
+    // --- ЗБЕРЕЖЕННЯ В ТИМЧАСОВИЙ ФАЙЛ ---
+    TempFile := GetTempDir + 'service_op_' + GenerateUUID + '.json';
     StringList.Text := JsonString;
-    StringList.SaveToFile(TempFile);
-
     try
-      // Використовуємо правильний ендпоінт для службових операцій
-      Command := Format('-X POST -H "Content-Type: application/json" ' +
-                       '-H "Accept: application/json" ' +
-                       '-H "X-Client-Name: %s" ' +
-                       '-H "X-Client-Version: %s" ' +
-                       '-H "Authorization: Bearer %s" ' +
-                       '--data-binary "@%s" ' +
-                       '"%s/api/v1/receipts/service"',
-        [FClientName, FClientVersion, FAuthInfo.Token, TempFile, FBaseURL]);
+      StringList.SaveToFile(TempFile);
+      Log('ServiceCashOperation: тимчасовий файл = ' + TempFile);
+    except
+      on E: Exception do
+      begin
+        AResponse := 'Помилка створення тимчасового файлу: ' + E.Message;
+        Log('❌ ServiceCashOperation: ' + AResponse);
+        Exit;
+      end;
+    end;
 
-      Log('ServiceCashOperation: Executing: curl ' + Command);
-      Result := ExecuteCurlCommand(Command, 'ServiceCashOperation',
-                'POST /api/v1/receipts/service', AResponse);
+    // --- ВИКОНАННЯ CURL ЗАПИТУ ---
+    try
+      // Ендпоінт: POST /api/v1/receipts/service (універсальний для SERVICE_IN/SERVICE_OUT)
+      Command := Format(
+        '-X POST '
+        + '-H "Content-Type: application/json" '
+        + '-H "Accept: application/json" '
+        + '-H "X-Client-Name: %s" '
+        + '-H "X-Client-Version: %s" '
+        + '-H "Authorization: Bearer %s" '
+        + '--data-binary "@%s" '
+        + '"%s/api/v1/receipts/service"',
+        [FClientName, FClientVersion, FAuthInfo.Token, TempFile, FBaseURL]
+      );
 
+      Log('ServiceCashOperation: curl ' + Copy(Command, 1, 200) + '...');
+
+      Result := ExecuteCurlCommand(
+        Command,
+        'ServiceCashOperation',
+        'POST /api/v1/receipts/service',
+        AResponse
+      );
+
+      // --- ОБРОБКА ВІДПОВІДІ ---
       if Result then
       begin
-        Log('ServiceCashOperation: Response: ' + Copy(AResponse, 1, 300));
+        Log('ServiceCashOperation: відповідь сервера = ' + Copy(AResponse, 1, 300));
 
+        // Перевіряємо на помилки
         if CheckResponseForErrors(AResponse) then
         begin
-          Log('ServiceCashOperation: Server error: ' + Copy(AResponse, 1, 200));
+          Log('❌ ServiceCashOperation: сервер повернув помилку');
+          ParseAPIError(AResponse, AResponse);
           Result := False;
+          Exit;
+        end;
+
+        // Парсимо відповідь
+        AReceiptResponse := TReceiptResponse.Create;
+        Result := AReceiptResponse.ParseFromJSON(AResponse, Self);
+
+        if Result then
+        begin
+          Log('✅ ServiceCashOperation: операція успішна, ID чека = ' + AReceiptResponse.Id);
+
+          // Оновлюємо баланс
+          FLastBalanceUpdate := 0;
+          ForceBalanceUpdate(AResponse);
         end
         else
         begin
-          AReceiptResponse := TReceiptResponse.Create;
-          Result := AReceiptResponse.ParseFromJSON(AResponse, Self);
-
-         if Result then
-         begin
-             Log('ServiceCashOperation: Operation successful');
-
-             // Оновлюємо баланс з відповіді сервера
-             if Assigned(AReceiptResponse) and Assigned(AReceiptResponse.Shift) and
-                      Assigned(AReceiptResponse.Shift.Balance) then
-             begin
-              FCurrentBalance := AReceiptResponse.Shift.Balance.Balance;
-              Log('Баланс оновлено з відповіді: ' +
-              FloatToStrF(FCurrentBalance / 100, ffNumber, 10, 2) + ' грн');
-             end
-             else
-             begin
-              // Резервний варіант - примусове оновлення
-              FLastBalanceUpdate := 0;
-              GetCurrentBalance(AResponse);
-             end;
-         end
+          Log('❌ ServiceCashOperation: помилка парсингу відповіді');
+          FreeAndNil(AReceiptResponse);
         end;
       end
       else
       begin
-        Log('ServiceCashOperation: CURL command failed: ' + AResponse);
+        Log('❌ ServiceCashOperation: помилка curl: ' + AResponse);
       end;
 
     finally
+      // Видаляємо тимчасовий файл
       if FileExists(TempFile) then
-        DeleteFile(TempFile);
+      begin
+        try
+          DeleteFile(TempFile);
+          Log('ServiceCashOperation: тимчасовий файл видалено');
+        except
+          on E: Exception do
+            Log('⚠️ ServiceCashOperation: не вдалося видалити тимчасовий файл: ' + E.Message);
+        end;
+      end;
     end;
 
-  except
-    on E: Exception do
-    begin
-      AResponse := 'CURL command error: ' + E.Message;
-      Log('ServiceCashOperation: Exception: ' + E.Message);
-      Result := False;
-    end;
+  finally
+    if Assigned(JsonData) then
+      JsonData.Free;
+    StringList.Free;
   end;
 end;
 
@@ -7504,7 +7489,7 @@ begin
 
     // Перевірка типів оплати
     case Payment.PaymentType of
-      ptCash, ptCashless, ptCard:
+      ptCash, ptCashless, ptOther:
         begin
           // Валідні типи
         end;
@@ -7513,20 +7498,20 @@ begin
       Exit;
     end;
 
-    // Специфічні перевірки для карткових платежів
-    if Payment.PaymentType = ptCard then
+    // Специфічні перевірки для безготівкових платежів з провайдером
+    if (Payment.PaymentType = ptCashless) and (Payment.ProviderType <> '') then
     begin
-      if Payment.ProviderType = '' then
-      begin
-        AError := Format('Для карткових платежів обовʼязково вказувати ProviderType (платіж #%d)', [I + 1]);
-        Exit;
-      end;
-
-      // Перевірка валідності провайдера
+      // Перевірка валідності провайдера (розширений список)
       if (Payment.ProviderType <> 'BANK') and
          (Payment.ProviderType <> 'TAPXPHONE') and
          (Payment.ProviderType <> 'POSCONTROL') and
-         (Payment.ProviderType <> 'TERMINAL') then
+         (Payment.ProviderType <> 'TERMINAL') and
+         (Payment.ProviderType <> 'LIQPAY') and
+         (Payment.ProviderType <> 'MONO') and
+         (Payment.ProviderType <> 'WAYFORPAY') and
+         (Payment.ProviderType <> 'NOVAPAY') and
+         (Payment.ProviderType <> 'EASYPAY') and
+         (Payment.ProviderType <> 'ROZETKAPAY') then
       begin
         AError := Format('Невідомий провайдер оплати: %s (платіж #%d)',
           [Payment.ProviderType, I + 1]);
@@ -7540,7 +7525,6 @@ begin
       case Payment.PaymentType of
         ptCash: Payment.LabelText := 'Готівка';
         ptCashless: Payment.LabelText := 'Безготівковий розрахунок';
-        ptCard: Payment.LabelText := 'Банківська картка';
       end;
     end;
 
@@ -7771,20 +7755,88 @@ begin
 end;
 
 
-function TReceiptWebAPI.CreateCardPayment(AValue: Integer;
-  AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
+function TReceiptWebAPI.CreateCashlessPayment(AValue: Integer;
+  ASubType: TCashlessSubType; const AIntegratorName: string): TPayment;
 begin
   Result := TPayment.Create;
-  Result.PaymentType := ptCard;
+  Result.PaymentType := ptCashless;
   Result.Value := AValue;
+  Result.Code := 1;  // CASHLESS (згідно з API)
+  Result.CashlessSubType := ASubType;
+  Result.LabelText := GetCashlessLabel(ASubType, AIntegratorName);
+
+  case ASubType of
+    cstCard:              Result.ProviderType := 'BANK';
+    cstInternetBanking:   Result.ProviderType := '';
+    cstInternetAcquiring: Result.ProviderType := 'BANK';
+    cstLiqPay:            Result.ProviderType := 'LIQPAY';
+    cstMono:              Result.ProviderType := 'MONO';
+    cstWayForPay:         Result.ProviderType := 'WAYFORPAY';
+    cstNovaPay:           Result.ProviderType := 'NOVAPAY';
+    cstEasyPay:           Result.ProviderType := 'EASYPAY';
+    cstGiftCertificate:   Result.ProviderType := '';
+    cstToken:             Result.ProviderType := '';
+    cstTransferNNPP:      Result.ProviderType := '';
+    cstTransferPTKS:      Result.ProviderType := '';
+    cstCurrentAccount:    Result.ProviderType := '';
+    cstElectronicMoney:   Result.ProviderType := '';
+    cstDigitalMoney:      Result.ProviderType := '';
+    cstCryptocurrency:    Result.ProviderType := '';
+    cstOtherCashless:     Result.ProviderType := '';
+  else
+    Result.ProviderType := '';
+  end;
+end;
+
+// ВИПРАВЛЕНО: CreateCardPayment тепер використовує CreateCashlessPayment
+function TReceiptWebAPI.CreateCardPayment(AValue: Integer;
+   AProvider: TPaymentProvider; ACardMask, AAuthCode, ARRN: string): TPayment;
+begin
+  Result := CreateCashlessPayment(AValue, cstCard);
   Result.ProviderType := PaymentProviderToString(AProvider);
-  Result.LabelText := 'Банківська картка';
-  Result.Code := 2; // Код для безготівкових оплат
+  Result.LabelText := 'Картка';  // Згідно Наказу 601
+  Result.Code := 1;               // ← ВИПРАВЛЕНО: CASHLESS = 1, не 2!
   Result.CardMask := ACardMask;
   Result.AuthCode := AAuthCode;
   Result.RRN := ARRN;
 end;
 
+// НОВИЙ метод: Створення платежу для переказу на IBAN/картку ФОП
+// Використовується при оплаті клієнтом через карту-ключ на рахунок ФОП
+function TReceiptWebAPI.CreateInternetBankingPayment(AValue: Integer;
+  const ARecipientIBAN, ARecipientName, APaymentPurpose: string): TPayment;
+begin
+  Result := CreateCashlessPayment(AValue, cstInternetBanking);
+
+  // Додаткові поля для IBAN-переказу
+  Result.BankName := ARecipientIBAN;        // IBAN отримувача
+  Result.AdditionalInfo := APaymentPurpose;  // Призначення платежу
+  Result.OwnerName := ARecipientName;        // Ім'я отримувача
+
+  // Для переказу через карту-ключ на рахунок ФОП:
+  // type: 'CASHLESS'
+  // code: 1
+  // label: 'Інтернет банкінг'
+  // ProviderType: '' (не потрібен для прямого IBAN-переказу)
+end;
+
+// НОВИЙ метод: Створення платежу через інтегратора
+function TReceiptWebAPI.CreateIntegratorPayment(AValue: Integer;
+  const AIntegratorName: string): TPayment;
+begin
+  if SameText(AIntegratorName, 'LiqPay') then
+    Result := CreateCashlessPayment(AValue, cstLiqPay)
+  else if SameText(AIntegratorName, 'Mono') then
+    Result := CreateCashlessPayment(AValue, cstMono)
+  else if SameText(AIntegratorName, 'WayForPay') then
+    Result := CreateCashlessPayment(AValue, cstWayForPay)
+  else if SameText(AIntegratorName, 'NovaPay') then
+    Result := CreateCashlessPayment(AValue, cstNovaPay)
+  else if SameText(AIntegratorName, 'EasyPay') then
+    Result := CreateCashlessPayment(AValue, cstEasyPay)
+  else
+    Result := CreateCashlessPayment(AValue, cstOtherCashless);
+end;
 
 
 function TReceiptWebAPI.GetReceiptHTML(const AReceiptId: string; out AHTMLContent: string): Boolean;
@@ -8536,7 +8588,30 @@ begin
   end;
 end;
 
+function TReceiptWebAPI.EnsureTokenValid(out AResponse: string): Boolean;
+begin
+  Result := True;
+  AResponse := '';
+
+  if IsTokenValid then
+  begin
+    Log('Токен дійсний');
+    Exit;
+  end;
+
+  Log('Токен недійсний, оновлюємо...');
+
+  if not LoginCurl(FUsername, FPassword, AResponse) then
+  begin
+    AResponse := 'Token expired and refresh failed: ' + AResponse;
+    Log('Помилка оновлення токена: ' + AResponse);
+    Log('Потрібен повторний вхід');
+    Result := False;
+    Exit;
+  end;
+
+  Log('Токен успішно оновлено');
+end;
 
 
 end.
-
