@@ -5,16 +5,18 @@ unit chekdb;
 interface
 
 uses
-  Classes, SysUtils, DB, SQLDB, DataMod, chekno, Controls, Dialogs, DGSer, dndata, otov, sprop,chektypes;
-
+  Classes, SysUtils, DateUtils, DB, SQLDB, DataMod, chekno, Controls, Dialogs,
+  DGSer, otov, sprop, chektypes, dndata, uAutoTransfer, uAppConfig;
 type
   // Тип для процедури логування
   TLogProcedure = procedure(const AMessage: string) of object;
 
-  // Record для збереження реквізитів оплати
+  // Record для збереження реквізитів оплати (оновлений згідно завдання)
   TPaymentDetails = record
-    PaymentType: string;
-    PaymentSubType: Integer;
+    PaymentTypeUI: string;      // українська назва типу (з БД)
+    SubTypeUI: string;          // українська назва підтипу (з БД)
+    PaymentTypeCode: Integer;   // числовий код (PAYMENT_TYPE_I)
+    SubTypeCode: Integer;       // числовий код (PAYMENT_SUBTYPE_I)
     CashAmount: Double;
     CardAmount: Double;
     IBAN: string;
@@ -26,6 +28,14 @@ type
     ProviderType: string;
     TerminalId: string;
   end;
+
+  //тип  тільки для передачі результату додавання товару
+  TAddProductResult = (
+    aprNone,              // нічого не додано / скасовано
+    aprAdded,             // товар додано, серійники не потрібні
+    aprNeedSerialSelect,  // товар додано, потрібно вибрати 1 серійник (VibSer)
+    aprNeedSerialsRemind  // товар додано, потрібно нагадати про кілька серійників
+  );
 
 
   { TChekDBManager }
@@ -41,9 +51,12 @@ type
     procedure Log(const AMessage: string);
     procedure SafeExecSQL(const SQLText: string); // Безпечне виконання SQL
 
+    // Допоміжна функція для конвертації старих типів оплати (тимчасово)
+    function ConvertOldPaymentTypeToNew(const OldType: string; out NewTypeUI: string; out NewSubTypeUI: string): Boolean;
+
   public
     datavv, nomer, psvid, nalkod, pnazva, pnazshort: string;  // Дані для звітів
-    knazva:string; //назва клієнта для збереження чеків
+    knazva: string; //назва клієнта для збереження чеків
     constructor Create(ADataModule: TDMMag; ALogProcedure: TLogProcedure);
     destructor Destroy; override;
     function AfterCreate(TempCurrentKlient: integer): Boolean;
@@ -64,9 +77,9 @@ type
     procedure SaveConnectionState(out ChekPos, NDataPos: Integer);
     procedure RestoreConnectionState(ChekPos, NDataPos: Integer);
 
-    // Методи роботи з чеками
+    // Методи роботи з чеками (оновлені сигнатури)
     function CreateNewCheck(SchetID: Integer; IsFiscal: Boolean = True;
-      PaymentType: string = 'CASH'; PaymentSubType: Integer = 0;
+      PaymentTypeUI: string = 'Готівка'; PaymentSubTypeUI: string = '';
       const IBAN: string = ''; const RecipientName: string = '';
       const PaymentPurpose: string = ''; const ProviderType: string = '';
       Note: string = ''): Integer;
@@ -92,11 +105,9 @@ type
     procedure ConvertToFiscal(CheckID: Integer);
 
     // Методи роботи з товарами
-    procedure AddProductToCheck;
-
+    function AddProductToCheck: TAddProductResult;
     procedure RemoveProductFromCheck(ProductDataID: Integer);
     function GetProductInfo(ProductDataID: Integer; out ProductName: string; out CheckID: Integer): Boolean;
-
     procedure UpdateProductInCheck;
     procedure VibSer;
 
@@ -106,11 +117,17 @@ type
     procedure MarkCheckAsFiscalized(CheckID: Integer; FiscalCode: string;
       FiscalID: string; ShiftID: string; CashRegisterID: string);
     procedure UpdateFiscalRetryCount(CheckID: Integer; RetryCount: Integer);
-
+    // === E1.2: Offline-коди ===
+    function SaveOfflineCodes(const ACodes: TOfflineCodeArray;
+      const ACashierLogin: string): Integer;
+    function AllocateOfflineCode(const ACR, APurpose: string;
+      out ACode: TOfflineCode): Boolean;
+    function CountFreeOfflineCodes(const ACR: string): Integer;
+    function CountReservedOrphans(const ACR: string): Integer;
+    function CleanupOrphanOfflineCodes(const ACR: string): Integer;
     // Валідація та утиліти
     function ValidateCheckIntegrity(CheckID: Integer): Boolean;
 
-    //function GetCurrentCheckID: Integer;
     function GetCurrentProductID: Integer;
     function GetCurrentProductName: string;
 
@@ -136,8 +153,10 @@ type
     procedure MarkCheckAsPrinted(CheckID: Integer);
     procedure RefreshDatasets(CurrentCheckID: Integer);
     procedure ValidateAndRepairCheckData(CheckID: Integer);
-    procedure UpdatePaymentInfo(CheckID: Integer; PaymentType: string;
-        CashAmount: Double; CardAmount: Double; PaymentSubType: Integer = 0;
+
+    // Оновлений метод оновлення оплати (з українськими назвами)
+    procedure UpdatePaymentInfo(CheckID: Integer; PaymentTypeUI: string;
+        CashAmount: Double; CardAmount: Double; PaymentSubTypeUI: string = '';
         const IBAN: string = ''; const RecipientName: string = '';
         const PaymentPurpose: string = ''; const CardMask: string = '';
         const AuthCode: string = ''; const RRN: string = '';
@@ -150,10 +169,69 @@ type
 
     function ClearSerialNumberAssignment: Boolean;
 
-    // Нові методи для роботи з оплатою
+    // Оновлений метод отримання деталей оплати
     function GetPaymentDetails(CheckID: Integer; out Details: TPaymentDetails): Boolean;
-    function ConvertOldPaymentType(const OldType: string; out NewType: string;
-      out SubType: Integer): Boolean;
+
+    // === E2.1: Offline-продаж (атомарно: INSERT queue + UPDATE CHEK + прив'язка коду) ===
+    function SaveOfflineSaleTransaction(
+      ACheckID: Integer;
+      const ACashRegisterID, ACashierLogin, AShiftID: string;
+      const AReceiptUUID, AJsonString: string;
+      const ACode: TOfflineCode;
+      out AError: string): Boolean;
+
+    // === E2.3: Локальні ліміти 36/168 (ТЗ §3.5) ===
+    function CheckOfflineLimits(const ACR: string; out AError: string): Boolean;
+
+    // === E2.4: Локальний стан каси (ТЗ §3.1) ===
+    function IsOfflineState(const ACR: string): Boolean;
+    // === E3.1: Управління offline-станом каси ===
+    // UPSERT: IS_OFFLINE=1, OFFLINE_STARTED_AT=NOW, OFFLINE_MONTH='YYYY-MM'.
+    // LAST_OFFLINE_SEQ_NUMBER не скидається (ТЗ §3.2 — скидання лише після go-online).
+    function UpdateOfflineStateStart(const ACR: string; out AError: string): Boolean;
+
+    // UPDATE: IS_OFFLINE=0, LAST_ONLINE_AT=NOW, LAST_OFFLINE_SEQ_NUMBER=0.
+    function UpdateOfflineStateStop(const ACR: string): Boolean;
+
+    // Кеш балансу на момент go-offline (NUMERIC(18,2) — гривні з копійками).
+    procedure CacheBalance(const ACR: string;
+      ABalance, ACashSales, ACardSales: Double);
+
+    // === E3.3.1: Черга sync ===
+    // Читає чергу для каси. Тільки STATUS IN ('ОЧІКУЄ','ВІДПРАВЛЕНО').
+    // Не тримає курсор — повертає масив.
+    function LoadPendingQueue(const ACR: string): TQueueItemArray;
+
+    // Оновлює статус черги. RetryDelta > 0 — інкремент RETRY_COUNT.
+    // Оновлює LAST_RETRY_AT = CURRENT_TIMESTAMP.
+    procedure SetQueueStatus(AQueueID: Integer; const AStatus, AError: string;
+      ARetryDelta: Integer = 0);
+
+    // Атомарно (одна транзакція):
+    //   1) UPDATE OFFLINE_RECEIPTS_QUEUE — STATUS='СИНХРОНІЗОВАНО', SYNCED_AT=NOW,
+    //      FISCAL_RESPONSE=<перші 500 символів>
+    //   2) UPDATE CHEK — FISCAL_STATUS='ФІСКАЛІЗОВАНО', FISCAL_CODE,
+    //      FISCAL_ID, FISCAL_DATE=NOW
+    //   3) UPDATE CHEK_OFFLINE_FISCAL_CODES — STATUS=2, USED_AT=NOW
+    function MarkSynced(AQueueID, ACheckID: Integer;
+      const AFiscalCode, AFiscalID, AResponseJSON: string;
+      out AError: string): Boolean;
+    // === E3.3.2: Leader-lock для multi-PC (ТЗ §3.8) ===
+    // Спроба захопити lock. TimeoutMin з ReadSyncLockTimeoutMin (5..120).
+    // RowsAffected > 0 → lock отримано.
+    function TryAcquireLock(const ACR, AOwner: string;
+      ATimeoutMin: Integer): Boolean;
+
+    // Heartbeat: оновлює SYNC_LOCKED_AT, якщо власник — ми.
+    procedure RefreshLock(const ACR, AOwner: string);
+
+    // Перевірка: чи ми досі власник lock.
+    function IsSyncLockOwner(const ACR, AOwner: string): Boolean;
+
+    // Звільнення lock (викликати у finally).
+    procedure ReleaseLock(const ACR, AOwner: string);
+    // Звільнення RESERVED-коду (для cleanup при JSON-build fail у chek.pas)
+    procedure ReleaseReservedCode(AID: Integer);
   end;
 
 implementation
@@ -532,14 +610,13 @@ begin
 end;
 
 // Методи роботи з чеками
-
 function TChekDBManager.CreateNewCheck(SchetID: Integer; IsFiscal: Boolean = True;
-  PaymentType: string = 'CASH'; PaymentSubType: Integer = 0;
+  PaymentTypeUI: string = 'Готівка'; PaymentSubTypeUI: string = '';
   const IBAN: string = ''; const RecipientName: string = '';
   const PaymentPurpose: string = ''; const ProviderType: string = '';
   Note: string = ''): Integer;
 var
-  s, FiscalStatus: string;
+  FiscalStatus: string;
 begin
   Result := 0;
 
@@ -549,42 +626,53 @@ begin
     Exit;
   end;
 
-  if IsFiscal then
-    FiscalStatus := 'PENDING'
-  else
-    FiscalStatus := 'NON_FISCAL';
+  // Валідація: для безготівкового обов'язково вказати підтип
+  if (PaymentTypeUI = 'Безготівковий') and (PaymentSubTypeUI = '') then
+  begin
+    Log('❌ Для безготівкової оплати потрібно вказати підтип');
+    Exit;
+  end;
 
-  s := 'insert into chek(schet,summa,dengi,sdacha,dolg,prim,printed,' +
-       'fiscal_status, payment_type, payment_subtype, cash_amount, card_amount, ' +
-       'iban, recipient_name, payment_purpose, card_mask, auth_code, rrn, ' +
-       'provider_type, terminal_id, created_at) ' +
-       'values(' + IntToStr(SchetID) + ',0,0,0,0,' +
-       #39 + Note + #39 + ',' + '0,' +
-       #39 + FiscalStatus + #39 + ',' +
-       #39 + PaymentType + #39 + ',' +
-       IntToStr(PaymentSubType) + ',' +
-       '0,0,' +
-       #39 + IBAN + #39 + ',' +
-       #39 + RecipientName + #39 + ',' +
-       #39 + PaymentPurpose + #39 + ',' +
-       #39 + '' + #39 + ',' +  // CARD_MASK - порожній при створенні
-       #39 + '' + #39 + ',' +  // AUTH_CODE
-       #39 + '' + #39 + ',' +  // RRN
-       #39 + ProviderType + #39 + ',' +
-       #39 + '' + #39 + ',' +  // TERMINAL_ID - порожній при створенні
-       'CURRENT_TIMESTAMP)';
+  // Перевірка, чи підтип є допустимим (якщо вказано)
+  if (PaymentSubTypeUI <> '') and not IsValidSubType(PaymentSubTypeUI) then
+  begin
+    Log('❌ Невідомий підтип оплати: ' + PaymentSubTypeUI);
+    Exit;
+  end;
+
+  if IsFiscal then
+    FiscalStatus := FS_PENDING
+  else
+    FiscalStatus := FS_NON_FISCAL;
 
   SavPos;
   ClsCon;
   try
-    // Виконати запит
+    // Параметризований запит
     FDataModule.SQLQ.Close;
-    FDataModule.SQLQ.SQL.Text := s;
+    FDataModule.SQLQ.SQL.Text :=
+      'INSERT INTO CHEK (SCHET, SUMMA, DENGI, SDACHA, DOLG, PRIM, PRINTED, ' +
+      'FISCAL_STATUS, PAYMENT_TYPE, PAYMENT_SUBTYPE, CASH_AMOUNT, CARD_AMOUNT, ' +
+      'IBAN, RECIPIENT_NAME, PAYMENT_PURPOSE, CARD_MASK, AUTH_CODE, RRN, ' +
+      'PROVIDER_TYPE, TERMINAL_ID, CREATED_AT) ' +
+      'VALUES (:SCHET, 0, 0, 0, 0, :PRIM, 0, :FISCAL_STATUS, :PAYMENT_TYPE, :PAYMENT_SUBTYPE, ' +
+      '0, 0, :IBAN, :RECIPIENT_NAME, :PAYMENT_PURPOSE, '''', '''', '''', :PROVIDER_TYPE, '''', CURRENT_TIMESTAMP)';
+
+    FDataModule.SQLQ.ParamByName('SCHET').AsInteger := SchetID;
+    FDataModule.SQLQ.ParamByName('PRIM').AsString := Note;
+    FDataModule.SQLQ.ParamByName('FISCAL_STATUS').AsString := FiscalStatus;
+    FDataModule.SQLQ.ParamByName('PAYMENT_TYPE').AsString := PaymentTypeUI;
+    FDataModule.SQLQ.ParamByName('PAYMENT_SUBTYPE').AsString := PaymentSubTypeUI;
+    FDataModule.SQLQ.ParamByName('IBAN').AsString := IBAN;
+    FDataModule.SQLQ.ParamByName('RECIPIENT_NAME').AsString := RecipientName;
+    FDataModule.SQLQ.ParamByName('PAYMENT_PURPOSE').AsString := PaymentPurpose;
+    FDataModule.SQLQ.ParamByName('PROVIDER_TYPE').AsString := ProviderType;
     FDataModule.SQLQ.ExecSQL;
 
     // Отримуємо ID створеного чека
     FDataModule.SQLQ.Close;
-    FDataModule.SQLQ.SQL.Text := 'SELECT MAX(KOD) as NEW_ID FROM CHEK WHERE SCHET = ' + IntToStr(SchetID);
+    FDataModule.SQLQ.SQL.Text := 'SELECT MAX(KOD) as NEW_ID FROM CHEK WHERE SCHET = :SCHET';
+    FDataModule.SQLQ.ParamByName('SCHET').AsInteger := SchetID;
     FDataModule.SQLQ.Open;
     Result := FDataModule.SQLQ.FieldByName('NEW_ID').AsInteger;
     FDataModule.SQLQ.Close;
@@ -613,7 +701,6 @@ begin
   RstPos;
   if Result > 0 then FDataModule.QChek.Locate('KOD', Result, []);
 end;
-
 
 function TChekDBManager.DeleteCheck: Boolean;
 var
@@ -696,9 +783,7 @@ begin
   // Чек можна видалити тільки якщо:
   // 1. Не фіскалізований і не в процесі фіскалізації
   // 2. Не містить товарів
-  Result := ((FiscalStatus = 'PENDING') or (FiscalStatus = '') or
-            (FiscalStatus = 'NON_FISCAL') or (FiscalStatus.IsEmpty))
-            and not HasProducts;
+  Result := IsFiscalStatusModifiable(FiscalStatus) and not HasProducts;
 
   Log('Перевірка видалення чека ' + IntToStr(CheckID) +
       ': номер=' + IntToStr(CheckNumber) +
@@ -749,7 +834,7 @@ begin
   if CheckID <= 0 then Exit;
 
   FiscalStatus := GetCheckFiscalStatus(CheckID);
-  Result := (FiscalStatus = 'DONE');
+  Result := IsFiscalStatusDone(FiscalStatus);
 
   Log('Перевірка фіскалізації чека ' + IntToStr(CheckID) +
       ': статус=' + FiscalStatus + ', фіскалізований=' + BoolToStr(Result, True));
@@ -772,8 +857,7 @@ begin
   FiscalStatus := GetCheckFiscalStatus(CheckID);
 
   // Чек можна модифікувати тільки якщо він не фіскалізований і не в процесі фіскалізації
-  Result := (FiscalStatus = 'PENDING') or (FiscalStatus = '') or
-            (FiscalStatus = 'NON_FISCAL') or (FiscalStatus.IsEmpty);
+  Result := IsFiscalStatusModifiable(FiscalStatus);
 
   Log('Перевірка модифікації чека ' + IntToStr(CheckID) +
       ': статус=' + FiscalStatus + ', можна_модифікувати=' + BoolToStr(Result, True));
@@ -844,10 +928,10 @@ begin
   ClsCon;
   try
     FDataModule.SQLQ.SQL.Text :=
-      'UPDATE CHEK SET FISCAL_STATUS = ''NON_FISCAL'', ' +
+      'UPDATE CHEK SET FISCAL_STATUS = :STATUS, ' +
       'PRIM = ''КОНВЕРТОВАНО В СЛУЖБОВИЙ'' ' +
       'WHERE KOD = :CHECK_ID';
-
+    FDataModule.SQLQ.ParamByName('STATUS').AsString := FS_NON_FISCAL;
     FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
     FDataModule.SQLQ.ExecSQL;
 
@@ -864,10 +948,10 @@ begin
   ClsCon;
   try
     FDataModule.SQLQ.SQL.Text :=
-      'UPDATE CHEK SET FISCAL_STATUS = ''PENDING'', ' +
+    'UPDATE CHEK SET FISCAL_STATUS = :STATUS, ' +
       'PRIM = ''КОНВЕРТОВАНО В ФІСКАЛЬНИЙ'' ' +
       'WHERE KOD = :CHECK_ID';
-
+    FDataModule.SQLQ.ParamByName('STATUS').AsString := FS_PENDING;
     FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
     FDataModule.SQLQ.ExecSQL;
 
@@ -1029,9 +1113,10 @@ begin
       'FISCAL_STATUS = :STATUS, ' +
       'FISCAL_RECEIPT_DATA = :FISCAL_DATA, ' +
       'FISCAL_ERROR_TEXT = :ERROR_TEXT, ' +
-      'FISCAL_DATE = CASE WHEN :STATUS = ''DONE'' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END ' +
+      'FISCAL_DATE = CASE WHEN :STATUS = ''' + FS_DONE + ''' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END '+
       'WHERE KOD = :CHECK_ID';
 
+    //FDataModule.SQLQ.ParamByName('DONE_STATUS').AsString := FS_DONE;
     FDataModule.SQLQ.ParamByName('STATUS').AsString := Status;
     FDataModule.SQLQ.ParamByName('FISCAL_DATA').AsString := FiscalData;
     FDataModule.SQLQ.ParamByName('ERROR_TEXT').AsString := ErrorText;
@@ -1054,7 +1139,7 @@ begin
   try
     FDataModule.SQLQ.SQL.Text :=
       'UPDATE CHEK SET ' +
-      'FISCAL_STATUS = ''DONE'', ' +
+      'FISCAL_STATUS = :DONE_STATUS, ' +
       'FISCAL_CODE = :FISCAL_CODE, ' +
       'FISCAL_ID = :FISCAL_ID, ' +
       'SHIFT_ID = :SHIFT_ID, ' +
@@ -1062,7 +1147,7 @@ begin
       'FISCAL_DATE = CURRENT_TIMESTAMP, ' +
       'FISCAL_RETRY_COUNT = 0 ' +
       'WHERE KOD = :CHECK_ID';
-
+    FDataModule.SQLQ.ParamByName('DONE_STATUS').AsString := FS_DONE;
     FDataModule.SQLQ.ParamByName('FISCAL_CODE').AsString := FiscalCode;
     FDataModule.SQLQ.ParamByName('FISCAL_ID').AsString := FiscalID;
     FDataModule.SQLQ.ParamByName('SHIFT_ID').AsString := ShiftID;
@@ -1473,10 +1558,11 @@ begin
       'FISCAL_STATUS = :STATUS, ' +
       'FISCAL_RECEIPT_DATA = :FISCAL_DATA, ' +
       'FISCAL_ERROR_TEXT = :ERROR_TEXT, ' +
-      'FISCAL_DATE = CASE WHEN :STATUS = ''DONE'' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END, ' +
-      'FISCAL_RETRY_COUNT = CASE WHEN :STATUS = ''ERROR'' THEN COALESCE(FISCAL_RETRY_COUNT, 0) + 1 ELSE FISCAL_RETRY_COUNT END ' +
+      'FISCAL_DATE = CASE WHEN :STATUS = :DONE_STATUS THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END, ' +
+      'FISCAL_RETRY_COUNT = CASE WHEN :STATUS = ''' + FS_ERROR + ''' THEN COALESCE(FISCAL_RETRY_COUNT, 0) + 1 ELSE FISCAL_RETRY_COUNT END ' +
       'WHERE KOD = :CHECK_ID';
-
+    FDataModule.SQLQ.ParamByName('DONE_STATUS').AsString := FS_DONE;
+    //FDataModule.SQLQ.ParamByName('ERROR_STATUS').AsString := FS_ERROR;
     FDataModule.SQLQ.ParamByName('STATUS').AsString := Status;
     FDataModule.SQLQ.ParamByName('FISCAL_DATA').AsString := FiscalData;
     FDataModule.SQLQ.ParamByName('ERROR_TEXT').AsString := ErrorText;
@@ -1501,7 +1587,7 @@ begin
 
   try
     // Оновлення статусу помилки в БД
-    UpdateFiscalStatusInDB(ACheckID, 'ERROR', '', E.Message);
+    UpdateFiscalStatusInDB(ACheckID,FS_ERROR, '', E.Message);
 
     // Оновлення тексту помилки через SQL (без QChek.Edit)
     FDataModule.SQLQ.SQL.Text :=
@@ -1563,7 +1649,7 @@ begin
     'FISCAL_STATUS = :STATUS, ' +
     'FISCAL_RECEIPT_DATA = :FISCAL_DATA, ' +
     'FISCAL_ERROR_TEXT = :ERROR_TEXT, ' +
-    'FISCAL_DATE = CASE WHEN :STATUS = ''DONE'' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END, ' +
+    'FISCAL_DATE = CASE WHEN :STATUS = ''' + FS_DONE + ''' THEN CURRENT_TIMESTAMP ELSE FISCAL_DATE END, ' +
     'FISCAL_RETRY_COUNT = :RETRY_COUNT, ' +
     'FISCAL_ID = :FISCAL_ID, ' +
     'FISCAL_CODE = :FISCAL_CODE, ' +
@@ -1577,6 +1663,7 @@ begin
     else
       FDataModule.SQLQ.ParamByName('RETRY_COUNT').AsInteger := RetryCount;
 
+    //FDataModule.SQLQ.ParamByName('DONE_STATUS').AsString := FS_DONE;
     FDataModule.SQLQ.ParamByName('STATUS').AsString := Status;
     FDataModule.SQLQ.ParamByName('FISCAL_DATA').AsString := FiscalData;
     FDataModule.SQLQ.ParamByName('ERROR_TEXT').AsString := ErrorText;
@@ -1687,11 +1774,12 @@ begin
       FDataModule.QNData.Open;
 
     // Відновлення статусів після аварійного завершення
-    if (FDataModule.QChekFISCAL_STATUS.AsString = 'SENT') or
-       (FDataModule.QChekFISCAL_STATUS.AsString = 'PROCESSING') then
+    if (FDataModule.QChekFISCAL_STATUS.AsString = FS_SENT) or
+       (FDataModule.QChekFISCAL_STATUS.AsString = 'PROCESSING') then  // PROCESSING — старий артефакт
     begin
       Log('⚠️ Відновлення статусу чека після аварійного завершення');
-      FDataModule.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_STATUS = ''NEW'' WHERE KOD = :CHECK_ID';
+      FDataModule.SQLQ.SQL.Text := 'UPDATE CHEK SET FISCAL_STATUS = :STATUS WHERE KOD = :CHECK_ID';
+      FDataModule.SQLQ.ParamByName('STATUS').AsString := FS_PENDING;
       FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
       FDataModule.SQLQ.ExecSQL;
     end;
@@ -1722,13 +1810,28 @@ begin
   end;
 end;
 
-procedure TChekDBManager.UpdatePaymentInfo(CheckID: Integer; PaymentType: string;
-  CashAmount: Double; CardAmount: Double; PaymentSubType: Integer = 0;
+// Оновлений метод оновлення оплати
+procedure TChekDBManager.UpdatePaymentInfo(CheckID: Integer; PaymentTypeUI: string;
+  CashAmount: Double; CardAmount: Double; PaymentSubTypeUI: string = '';
   const IBAN: string = ''; const RecipientName: string = '';
   const PaymentPurpose: string = ''; const CardMask: string = '';
   const AuthCode: string = ''; const RRN: string = '';
   const ProviderType: string = ''; const TerminalId: string = '');
 begin
+  // Валідація: для безготівкового обов'язково вказати підтип
+  if (PaymentTypeUI = 'Безготівковий') and (PaymentSubTypeUI = '') then
+  begin
+    Log('❌ Для безготівкової оплати потрібно вказати підтип');
+    raise Exception.Create('Для безготівкової оплати потрібно вказати підтип');
+  end;
+
+  // Перевірка, чи підтип є допустимим (якщо вказано)
+  if (PaymentSubTypeUI <> '') and not IsValidSubType(PaymentSubTypeUI) then
+  begin
+    Log('❌ Невідомий підтип оплати: ' + PaymentSubTypeUI);
+    raise Exception.Create('Невідомий підтип оплати: ' + PaymentSubTypeUI);
+  end;
+
   try
     FDataModule.SQLQ.SQL.Text :=
       'UPDATE CHEK SET ' +
@@ -1747,8 +1850,8 @@ begin
       'UPDATED_AT = CURRENT_TIMESTAMP ' +
       'WHERE KOD = :CHECK_ID';
 
-    FDataModule.SQLQ.ParamByName('PAYMENT_TYPE').AsString := PaymentType;
-    FDataModule.SQLQ.ParamByName('PAYMENT_SUBTYPE').AsInteger := PaymentSubType;
+    FDataModule.SQLQ.ParamByName('PAYMENT_TYPE').AsString := PaymentTypeUI;
+    FDataModule.SQLQ.ParamByName('PAYMENT_SUBTYPE').AsString := PaymentSubTypeUI;
     FDataModule.SQLQ.ParamByName('CASH_AMOUNT').AsFloat := CashAmount;
     FDataModule.SQLQ.ParamByName('CARD_AMOUNT').AsFloat := CardAmount;
     FDataModule.SQLQ.ParamByName('IBAN').AsString := IBAN;
@@ -1764,9 +1867,24 @@ begin
     FDataModule.SQLQ.ExecSQL;
 
     Log('Оновлено інформацію про оплату для чека ' + IntToStr(CheckID) +
-        ': тип=' + PaymentType + ', підтип=' + IntToStr(PaymentSubType) +
+        ': тип=' + PaymentTypeUI + ', підтип=' + PaymentSubTypeUI +
         ', готівка: ' + FloatToStrF(CashAmount, ffNumber, 10, 2) +
         ', картка: ' + FloatToStrF(CardAmount, ffNumber, 10, 2));
+
+        // === ВИПРАВЛЕННЯ: оновлюємо живий датасет після прямого UPDATE ===
+        if FDataModule.QChek.Active then
+        begin
+          // Найнадійніше — повне перевідкриття + позиціонування
+          FDataModule.QChek.DisableControls;
+          try
+            FDataModule.QChek.Close;
+            FDataModule.QChek.Open;
+            if CheckID > 0 then
+              FDataModule.QChek.Locate('KOD', CheckID, []);
+          finally
+            FDataModule.QChek.EnableControls;
+          end;
+        end;
 
   except
     on E: Exception do
@@ -1794,103 +1912,130 @@ begin
   Log('========================');
 end;
 
-procedure TChekDBManager.AddProductToCheck;
+function TChekDBManager.AddProductToCheck: TAddProductResult;
 var
-  s, z: string;
-  dalee: boolean;
-  zs, cs: integer;
+  Ctx: TTransferContext;
+  Res: TTransferResult;
+  dalee: Boolean;
   CurrentPaymentType: string;
   CurrentSumma: Double;
+  cur_schet, cur_chek: Integer;
 begin
+  Result := aprNone;
+
   if not CanModifyCheck then Exit;
-  if (not FDataModule.QChekKod.IsNull) and (CurrentSchet > 0) then
+
+  if FDataModule.QChekKod.IsNull or (CurrentSchet <= 0) then
   begin
-    repeat
-      FmOTov.OpenCon;
-      if FmOtov.ShowModal = mrOk then
+    MessageDlg('Спочатку відкрийте новий чек!', mtWarning, [mbOk], 0);
+    Exit;
+  end;
+
+  cur_schet := CurrentSchet;
+  cur_chek  := FDataModule.QChekKOD.AsInteger;
+
+  repeat
+    FmOTov.OpenCon;
+    if FmOTov.ShowModal = mrOk then
+    begin
+      FmNData.DateEdit1.Date := Date;
+      FmNData.Label12.Caption := FDataModule.QOTNAZVA.AsString;
+      FmNData.SpinEdit1.MaxValue := FDataModule.QOTKOL.AsInteger;
+      FmNData.SpinEdit1.Value := 1;
+      FmNData.FloatSpinEdit2.Value := FDataModule.QOTCENA.AsFloat;
+      FmNData.Label5.Caption := FDataModule.QOTED.AsString;
+      FmNData.pereschet;
+
+      if FmNData.ShowModal = mrOk then
       begin
-        FmNData.DateEdit1.Date := Date;
-        FmNData.Label12.Caption := FDataModule.QOTNAZVA.AsString;
-        FmNData.SpinEdit1.MaxValue := FDataModule.QOTKOL.AsInteger;
-        FmNData.SpinEdit1.Value := 1;
-        FmNData.FloatSpinEdit2.Value := FDataModule.QOTCENA.AsFloat;
-        FmNData.Label5.Caption := FDataModule.QOTED.AsString;
-        FmNData.pereschet;
-        if FmNData.ShowModal = mrOk then
+        dalee := True;
+        SavPos;
+
+        Ctx.DocID       := cur_schet;
+        Ctx.IsCheck     := True;
+        Ctx.CheckID     := cur_chek;
+        Ctx.PrimPrefix  := 'чека';
+        Ctx.SrcOtdel    := FDataModule.QOTOTDEL.AsInteger;
+        Ctx.TovKod      := FDataModule.QOTTOVAR.AsInteger;
+        Ctx.TovNazva    := FDataModule.QOTNAZVA.AsString;
+        Ctx.TovEd       := FDataModule.QOTED.AsString;
+        Ctx.TovCenaPrih := FDataModule.QOTCENA_PRIH.AsFloat;
+        Ctx.TovTip      := FDataModule.QOTTIP.AsInteger;
+        Ctx.Kol         := FmNData.SpinEdit1.Value;
+        Ctx.Cena        := FmNData.FloatSpinEdit2.Value;
+        Ctx.Summa       := FmNData.Label10.Caption;
+
+        FmOTov.CloseCon;
+        ClsCon;
+
+        if AutoAddProductWithTransfer(Ctx, Res) then
         begin
-          dalee := true;
-          SavPos;
-          s := 'insert into nak_data(chek,schet,data_vv,tovar,ed,kol,cena,cena_prih,summa,summa_prih,otdel,tip,cena_sklad) values(' +
-               FDataModule.QChekKOD.AsString + ',' + inttostr(CurrentSchet) + ',' +
-               #39 + FormatDateTime('dd.mm.yyyy', Date) + #39 + ',' +
-               FDataModule.QOTTOVAR.AsString + ',' +
-               #39 + FDataModule.QOTED.AsString + #39 + ',' +
-               FmNData.SpinEdit1.Text + ',' +
-               #39 + FloatToStrF(round(FmNData.FloatSpinEdit2.Value * 1000) / 1000, ffGeneral, 10, 3, FDataModule.fmt) + #39 + ',' +
-               #39 + FloatToStrF(round(FDataModule.QOTCENA_PRIH.AsFloat * 100) / 100, ffGeneral, 10, 2, FDataModule.fmt) + #39 + ',' +
-               FmNData.Label10.Caption + ',' +
-               FmNData.SpinEdit1.Text + '*' + FloatToStrF(round(FDataModule.QOTCENA_PRIH.AsFloat * 100) / 100, ffGeneral, 10, 2, FDataModule.fmt) + ',' +
-               FDataModule.QOTOTDEL.AsString + ',' +
-               FDataModule.QOTTIP.AsString + ',' +
-               #39 + FloatToStrF(round(FmNData.FloatSpinEdit2.Value * 1000) / 1000, ffGeneral, 10, 3, FDataModule.fmt) + #39 + ')';
-          z := 'select count(s.kod) from serijnik s, prih_data p where (s.nak_data is null) and s.sklad=' + inttostr(FDataModule.otdel) +
-               ' and s.prih_data=p.kod and p.tovar=' + FDataModule.QOTTOVAR.AsString;
-          cs := FmNData.SpinEdit1.Value;
-          FmOTov.CloseCon;
-          ClsCon;
-          FDataModule.LaunchQuery(FDataModule.SQLQ, FDataModule.TrMag, s);
-          zs := FDataModule.Zapros('count', z);
           OpnCon;
           RstPos;
           FDataModule.QNData.Last;
 
-          // Оновлення інформації про оплату після додавання товару
-          // з урахуванням поточного типу оплати чека
+          // Оновлення сум оплати (повний старий варіант)
           if not FDataModule.QChekKOD.IsNull then
           begin
             CurrentPaymentType := GetCurrentPaymentType;
             CurrentSumma := FDataModule.QChekSUMMA.AsFloat;
 
-            if CurrentPaymentType = 'CASH' then
+            if CurrentPaymentType = 'Готівка' then
             begin
-              UpdatePaymentInfo(FDataModule.QChekKOD.AsInteger, 'CASH',
-                                CurrentSumma, 0);
-              Log('💰 Оновлено CASH_AMOUNT після додавання товару, сума=' + FloatToStrF(CurrentSumma, ffNumber, 10, 2));
+              UpdatePaymentInfo(FDataModule.QChekKOD.AsInteger, 'Готівка',
+                                CurrentSumma, 0, '');
+              Log('💰 Оновлено CASH_AMOUNT після додавання товару, сума=' +
+                  FloatToStrF(CurrentSumma, ffNumber, 10, 2));
             end
-            else if CurrentPaymentType = 'CASHLESS' then
+            else if CurrentPaymentType = 'Безготівковий' then
             begin
-              UpdatePaymentInfo(FDataModule.QChekKOD.AsInteger, 'CASHLESS',
+              UpdatePaymentInfo(FDataModule.QChekKOD.AsInteger, 'Безготівковий',
                                 0, CurrentSumma,
-                                FDataModule.QChekPAYMENT_SUBTYPE.AsInteger);
-              Log('💳 Оновлено CARD_AMOUNT після додавання товару, сума=' + FloatToStrF(CurrentSumma, ffNumber, 10, 2));
+                                FDataModule.QChekPAYMENT_SUBTYPE.AsString);
+              Log('💳 Оновлено CARD_AMOUNT після додавання товару, сума=' +
+                  FloatToStrF(CurrentSumma, ffNumber, 10, 2));
             end
             else
-            begin
-              // Для змішаної оплати або інших типів — залишаємо без змін
-              Log('ℹ️ Тип оплати чека: ' + CurrentPaymentType + ' — суми оплати не оновлено (змішаний/інший тип)');
-            end;
+              Log('ℹ️ Тип оплати чека: ' + CurrentPaymentType +
+                  ' — суми оплати не оновлено (змішаний/інший тип)');
           end;
 
-          if zs > 0 then
-            if cs = 1 then
-              VibSer
-            else
-              messagedlg('Не забудьте вказати серійні номери.', mtinformation, [mbok], 0);
+          Result := aprAdded;
+
+          if Res.NeedSerialSelect then
+          begin
+            VibSer;
+            Result := aprNeedSerialSelect;
+          end
+          else if Res.NeedSerialsRemind then
+          begin
+            MessageDlg('Не забудьте вказати серійні номери.', mtInformation, [mbOk], 0);
+            Result := aprNeedSerialsRemind;
+          end;
         end
         else
-          dalee := false;
+        begin
+          OpnCon;
+          RstPos;
+        end;
       end
       else
-      begin
-        dalee := false;
-        FmOTov.CloseCon;
-      end;
-    until not dalee;
-  end
-  else
-    messagedlg('Спочатку відкрийте новий чек!', mtwarning, [mbok], 0);
-end;
+        dalee := False;
+    end
+    else
+    begin
+      dalee := False;
+      FmOTov.CloseCon;
+    end;
+  until not dalee;
 
+  if not FDataModule.QChek.Active then
+  begin
+    if FDataModule.TrMag.Active then FDataModule.TrMag.Commit;
+    OpnCon;
+  end;
+  RstPos;
+end;
 
 procedure TChekDBManager.VibSer;
 begin
@@ -1942,7 +2087,7 @@ end;
 function TChekDBManager.GetCurrentPaymentType: string;
 begin
   if FDataModule.QChek.Active and not FDataModule.QChek.IsEmpty then
-    Result := FDataModule.QChek.FieldByName('PAYMENT_TYPE').AsString
+    Result := FDataModule.QChek.FieldByName('PAYMENT_TYPE').AsString  // тепер українська назва
   else
     Result := '';
 end;
@@ -2127,14 +2272,13 @@ begin
     else
       FiscalStatus := '';
 
-    if FiscalStatus = 'DONE' then
+    if FiscalStatus = FS_DONE then
     begin
-      ErrorMessage := 'Чек вже фіскалізований (номер: ' +
-        FDataModule.QChekFISCAL_CODE.AsString + ')';
+      ErrorMessage := 'Чек вже фіскалізований (номер: ' + FDataModule.QChekFISCAL_CODE.AsString + ')';
       Exit;
     end;
 
-    if FiscalStatus = 'NON_FISCAL' then
+    if FiscalStatus = FS_NON_FISCAL then
     begin
       ErrorMessage := 'Це службовий чек - фіскалізація не виконується';
       Exit;
@@ -2241,12 +2385,58 @@ begin
   end;
 end;
 
-// Нові методи для роботи з оплатою
+// Допоміжна функція для конвертації старих типів (тимчасово)
+function TChekDBManager.ConvertOldPaymentTypeToNew(const OldType: string; out NewTypeUI: string; out NewSubTypeUI: string): Boolean;
+begin
+  Result := True;
+  if OldType = 'CASH' then
+  begin
+    NewTypeUI := 'Готівка';
+    NewSubTypeUI := '';
+  end
+  else if OldType = 'CASHLESS' then
+  begin
+    NewTypeUI := 'Безготівковий';
+    NewSubTypeUI := '';
+  end
+  else if OldType = 'MIXED' then
+  begin
+    NewTypeUI := 'Змішана';
+    NewSubTypeUI := '';
+  end
+  else if OldType = 'OTHER' then
+  begin
+    NewTypeUI := 'Інше';
+    NewSubTypeUI := '';
+  end
+  else
+  begin
+    Result := False;
+    NewTypeUI := '';
+    NewSubTypeUI := '';
+  end;
+end;
 
+// Оновлений метод отримання деталей оплати
 function TChekDBManager.GetPaymentDetails(CheckID: Integer; out Details: TPaymentDetails): Boolean;
 begin
   Result := False;
-  FillChar(Details, SizeOf(Details), 0);
+
+  // Явна ініціалізація всіх полів замість FillChar
+  Details.PaymentTypeUI := '';
+  Details.SubTypeUI := '';
+  Details.PaymentTypeCode := 0;
+  Details.SubTypeCode := 0;
+  Details.CashAmount := 0.0;
+  Details.CardAmount := 0.0;
+  Details.IBAN := '';
+  Details.RecipientName := '';
+  Details.PaymentPurpose := '';
+  Details.CardMask := '';
+  Details.AuthCode := '';
+  Details.RRN := '';
+  Details.ProviderType := '';
+  Details.TerminalId := '';
 
   if CheckID <= 0 then
   begin
@@ -2258,27 +2448,29 @@ begin
   ClsCon;
   try
     FDataModule.SQLQ.SQL.Text :=
-      'SELECT PAYMENT_TYPE, PAYMENT_SUBTYPE, CASH_AMOUNT, CARD_AMOUNT, ' +
-      'IBAN, RECIPIENT_NAME, PAYMENT_PURPOSE, CARD_MASK, AUTH_CODE, RRN, ' +
-      'PROVIDER_TYPE, TERMINAL_ID ' +
+      'SELECT PAYMENT_TYPE, PAYMENT_SUBTYPE, PAYMENT_TYPE_I, PAYMENT_SUBTYPE_I, ' +
+      'CASH_AMOUNT, CARD_AMOUNT, IBAN, RECIPIENT_NAME, PAYMENT_PURPOSE, ' +
+      'CARD_MASK, AUTH_CODE, RRN, PROVIDER_TYPE, TERMINAL_ID ' +
       'FROM CHEK WHERE KOD = :CHECK_ID';
     FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger := CheckID;
     FDataModule.SQLQ.Open;
 
     if not FDataModule.SQLQ.EOF then
     begin
-      Details.PaymentType    := FDataModule.SQLQ.FieldByName('PAYMENT_TYPE').AsString;
-      Details.PaymentSubType := FDataModule.SQLQ.FieldByName('PAYMENT_SUBTYPE').AsInteger;
-      Details.CashAmount     := FDataModule.SQLQ.FieldByName('CASH_AMOUNT').AsFloat;
-      Details.CardAmount     := FDataModule.SQLQ.FieldByName('CARD_AMOUNT').AsFloat;
-      Details.IBAN           := FDataModule.SQLQ.FieldByName('IBAN').AsString;
-      Details.RecipientName  := FDataModule.SQLQ.FieldByName('RECIPIENT_NAME').AsString;
+      Details.PaymentTypeUI := FDataModule.SQLQ.FieldByName('PAYMENT_TYPE').AsString;
+      Details.SubTypeUI := FDataModule.SQLQ.FieldByName('PAYMENT_SUBTYPE').AsString;
+      Details.PaymentTypeCode := FDataModule.SQLQ.FieldByName('PAYMENT_TYPE_I').AsInteger;
+      Details.SubTypeCode := FDataModule.SQLQ.FieldByName('PAYMENT_SUBTYPE_I').AsInteger;
+      Details.CashAmount := FDataModule.SQLQ.FieldByName('CASH_AMOUNT').AsFloat;
+      Details.CardAmount := FDataModule.SQLQ.FieldByName('CARD_AMOUNT').AsFloat;
+      Details.IBAN := FDataModule.SQLQ.FieldByName('IBAN').AsString;
+      Details.RecipientName := FDataModule.SQLQ.FieldByName('RECIPIENT_NAME').AsString;
       Details.PaymentPurpose := FDataModule.SQLQ.FieldByName('PAYMENT_PURPOSE').AsString;
-      Details.CardMask       := FDataModule.SQLQ.FieldByName('CARD_MASK').AsString;
-      Details.AuthCode       := FDataModule.SQLQ.FieldByName('AUTH_CODE').AsString;
-      Details.RRN            := FDataModule.SQLQ.FieldByName('RRN').AsString;
-      Details.ProviderType   := FDataModule.SQLQ.FieldByName('PROVIDER_TYPE').AsString;
-      Details.TerminalId     := FDataModule.SQLQ.FieldByName('TERMINAL_ID').AsString;
+      Details.CardMask := FDataModule.SQLQ.FieldByName('CARD_MASK').AsString;
+      Details.AuthCode := FDataModule.SQLQ.FieldByName('AUTH_CODE').AsString;
+      Details.RRN := FDataModule.SQLQ.FieldByName('RRN').AsString;
+      Details.ProviderType := FDataModule.SQLQ.FieldByName('PROVIDER_TYPE').AsString;
+      Details.TerminalId := FDataModule.SQLQ.FieldByName('TERMINAL_ID').AsString;
       Result := True;
       Log('✅ Отримано деталі оплати для чека ' + IntToStr(CheckID));
     end
@@ -2294,36 +2486,1102 @@ begin
   end;
 end;
 
-function TChekDBManager.ConvertOldPaymentType(const OldType: string; out NewType: string;
-  out SubType: Integer): Boolean;
-begin
-  Result := True;
-  NewType := OldType;
-  SubType := 0;
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E1.2 — Offline-коди. ТЗ §3.3.                                                 }
+{═══════════════════════════════════════════════════════════════════════════════}
 
-  if OldType = 'CASH' then
+{ INSERT нових кодів зі STATUS=0, PURPOSE=NULL, FISCAL_DATE=CURRENT_TIMESTAMP.
+  Пропускає ті, що вже є (UNIQUE FISCAL_CODE). Повертає кількість вставлених. }
+function TChekDBManager.SaveOfflineCodes(const ACodes: TOfflineCodeArray;
+  const ACashierLogin: string): Integer;
+var
+  I, Inserted: Integer;
+begin
+  Result := 0;
+  Inserted := 0;
+
+  if Length(ACodes) = 0 then Exit;
+
+  SavPos;
+  ClsCon;
+  try
+    FDataModule.TrMag.StartTransaction;
+    try
+      for I := 0 to High(ACodes) do
+      begin
+        if Trim(ACodes[I].FiscalCode) = '' then Continue;
+
+        // Пропускаємо вже існуючі
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'SELECT COUNT(*) AS CNT FROM CHEK_OFFLINE_FISCAL_CODES ' +
+          'WHERE FISCAL_CODE = :FC';
+        FDataModule.SQLQ.ParamByName('FC').AsString := ACodes[I].FiscalCode;
+        FDataModule.SQLQ.Open;
+        if FDataModule.SQLQ.FieldByName('CNT').AsInteger > 0 then
+        begin
+          FDataModule.SQLQ.Close;
+          Continue;
+        end;
+        FDataModule.SQLQ.Close;
+
+        // INSERT (ID згенерує тригер TR_CHEK_OFFLINE_FISCAL_CODES)
+        FDataModule.SQLQ.SQL.Text :=
+          'INSERT INTO CHEK_OFFLINE_FISCAL_CODES (' +
+          '  CASH_REGISTER_ID, CASHIER_LOGIN, FISCAL_CODE, ' +
+          '  STATUS, PURPOSE, FISCAL_DATE, CREATED_AT) ' +
+          'VALUES (:CR, :CL, :FC, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)';
+        FDataModule.SQLQ.ParamByName('CR').AsString := ACodes[I].CashRegisterID;
+        FDataModule.SQLQ.ParamByName('CL').AsString := ACashierLogin;
+        FDataModule.SQLQ.ParamByName('FC').AsString := ACodes[I].FiscalCode;
+        FDataModule.SQLQ.ExecSQL;
+        Inc(Inserted);
+      end;
+
+      FDataModule.TrMag.Commit;
+    except
+      FDataModule.TrMag.Rollback;
+      raise;
+    end;
+  finally
+    OpnCon;
+    RstPos;
+  end;
+
+  Result := Inserted;
+  Log(Format('SaveOfflineCodes: вставлено %d з %d (CR=%s)',
+    [Inserted, Length(ACodes), Copy(ACodes[0].CashRegisterID, 1, 8) + '...']));
+end;
+
+{ Резервує 1 код: STATUS=0 → STATUS=1 + PURPOSE + RESERVED_AT.
+  ТЗ §3.3: SELECT FIRST 1 ... FOR UPDATE WITH LOCK. }
+function TChekDBManager.AllocateOfflineCode(const ACR, APurpose: string;
+  out ACode: TOfflineCode): Boolean;
+var
+  Retry: Integer;
+  Success: Boolean;
+begin
+  Result := False;
+  ACode.ID := 0;
+  ACode.FiscalCode := '';
+  ACode.CashRegisterID := ACR;
+  Success := False;
+
+  for Retry := 1 to 3 do
   begin
-    NewType := 'CASH';
-    SubType := 0;
-    Log('Конвертація: CASH → CASH, підтип=0');
-  end
-  else if OldType = 'CARD' then
-  begin
-    NewType := 'CASHLESS';
-    SubType := 1; // Картка
-    Log('Конвертація: CARD → CASHLESS, підтип=1 (Картка)');
-  end
-  else if OldType = 'MIXED' then
-  begin
-    NewType := 'CASHLESS';
-    SubType := 1; // Картка (з попередженням)
-    Log('⚠️ Конвертація: MIXED → CASHLESS, підтип=1 (Картка). Увага: змішаний тип перетворено в картковий!');
-  end
-  else
-  begin
-    Result := False;
-    Log('❌ Невідомий старий тип оплати: ' + OldType);
+    try
+      SavPos;
+      ClsCon;
+      try
+        FDataModule.TrMag.StartTransaction;
+        try
+          FDataModule.SQLQ.Close;
+          FDataModule.SQLQ.SQL.Text :=
+            'SELECT FIRST 1 ID, FISCAL_CODE FROM CHEK_OFFLINE_FISCAL_CODES ' +
+            'WHERE CASH_REGISTER_ID = :CR AND STATUS = 0 ' +
+            '  AND (PURPOSE IS NULL OR PURPOSE = :PU) ' +
+            'ORDER BY CREATED_AT ' +
+            'FOR UPDATE WITH LOCK';
+          FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+          FDataModule.SQLQ.ParamByName('PU').AsString := APurpose;
+          FDataModule.SQLQ.Open;
+
+          if FDataModule.SQLQ.EOF then
+          begin
+            FDataModule.SQLQ.Close;
+            FDataModule.TrMag.Commit;
+            Log('AllocateOfflineCode: вільних кодів немає (CR=' +
+                Copy(ACR, 1, 8) + '..., PURPOSE=' + APurpose + ')');
+            Exit;
+          end;
+
+          ACode.ID := FDataModule.SQLQ.FieldByName('ID').AsInteger;
+          ACode.FiscalCode := FDataModule.SQLQ.FieldByName('FISCAL_CODE').AsString;
+          FDataModule.SQLQ.Close;
+
+          FDataModule.SQLQ.SQL.Text :=
+            'UPDATE CHEK_OFFLINE_FISCAL_CODES SET ' +
+            '  STATUS = 1, PURPOSE = :PU, RESERVED_AT = CURRENT_TIMESTAMP ' +
+            'WHERE ID = :ID AND STATUS = 0';
+          FDataModule.SQLQ.ParamByName('PU').AsString := APurpose;
+          FDataModule.SQLQ.ParamByName('ID').AsInteger := ACode.ID;
+          FDataModule.SQLQ.ExecSQL;
+
+          FDataModule.TrMag.Commit;
+          Success := True;
+        except
+          FDataModule.TrMag.Rollback;
+          raise;
+        end;
+      finally
+        OpnCon;
+        RstPos;
+      end;
+    except
+      on E: Exception do
+      begin
+        Log(Format('AllocateOfflineCode: retry %d — %s', [Retry, E.Message]));
+        if Retry >= 3 then
+          raise;
+        Sleep(100);
+      end;
+    end;
+
+    if Success then Break;
+  end;
+
+  Result := Success;
+  if Result then
+    Log(Format('AllocateOfflineCode: RESERVED ID=%d FISCAL_CODE=%s PURPOSE=%s',
+      [ACode.ID, ACode.FiscalCode, APurpose]));
+end;
+
+{ Рахує вільні коди. НЕ торкається чужої транзакції:
+  якщо TrMag вже активна — використовує її; якщо ні — стартує й комітить свою. }
+function TChekDBManager.CountFreeOfflineCodes(const ACR: string): Integer;
+var
+  WasActive: Boolean;
+begin
+  Result := 0;
+  if ACR = '' then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'SELECT COUNT(*) AS CNT FROM CHEK_OFFLINE_FISCAL_CODES ' +
+        'WHERE CASH_REGISTER_ID = :CR AND STATUS = 0';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.Open;
+      if not FDataModule.SQLQ.EOF then
+        Result := FDataModule.SQLQ.FieldByName('CNT').AsInteger;
+      FDataModule.SQLQ.Close;
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
   end;
 end;
+
+{ Рахує RESERVED-сироти (STATUS=1, CHECK_ID IS NULL). Аналогічний захист. }
+function TChekDBManager.CountReservedOrphans(const ACR: string): Integer;
+var
+  WasActive: Boolean;
+begin
+  Result := 0;
+  if ACR = '' then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'SELECT COUNT(*) AS CNT FROM CHEK_OFFLINE_FISCAL_CODES ' +
+        'WHERE CASH_REGISTER_ID = :CR ' +
+        '  AND STATUS = 1 AND CHECK_ID IS NULL';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.Open;
+      if not FDataModule.SQLQ.EOF then
+        Result := FDataModule.SQLQ.FieldByName('CNT').AsInteger;
+      FDataModule.SQLQ.Close;
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{ Скидає завислі RESERVED (CHECK_ID IS NULL, старші за 5 хв) → FREE.
+  FISCAL_DATE не чіпаємо (ТЗ §3.3). }
+function TChekDBManager.CleanupOrphanOfflineCodes(const ACR: string): Integer;
+var
+  Affected: Integer;
+begin
+  Result := 0;
+  if ACR = '' then Exit;
+
+  SavPos;
+  ClsCon;
+  try
+    FDataModule.TrMag.StartTransaction;
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'UPDATE CHEK_OFFLINE_FISCAL_CODES SET ' +
+        '  STATUS = 0, PURPOSE = NULL, RESERVED_AT = NULL ' +
+        'WHERE CASH_REGISTER_ID = :CR ' +
+        '  AND STATUS = 1 ' +
+        '  AND CHECK_ID IS NULL ' +
+        '  AND (RESERVED_AT IS NULL OR ' +
+        '       RESERVED_AT < DATEADD(-5 MINUTE TO CURRENT_TIMESTAMP))';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.ExecSQL;
+      Affected := FDataModule.SQLQ.RowsAffected;
+      FDataModule.TrMag.Commit;
+      Result := Affected;
+    except
+      FDataModule.TrMag.Rollback;
+      raise;
+    end;
+  finally
+    OpnCon;
+    RstPos;
+  end;
+
+  if Result > 0 then
+    Log(Format('CleanupOrphanOfflineCodes: звільнено %d кодів (CR=%s)',
+      [Result, Copy(ACR, 1, 8) + '...']));
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E2.1 — Збереження offline-продажу (атомарно).                                }
+{  Код уже виділено у виклику (AllocateOfflineCode), тут лише:                  }
+{    1) INSERT OFFLINE_RECEIPTS_QUEUE (STATUS=ОЧІКУЄ, LAST_RETRY_AT=NOW)         }
+{    2) UPDATE CHEK.FISCAL_STATUS = ОЧІКУЄ                                       }
+{    3) UPDATE CHEK_OFFLINE_FISCAL_CODES — прив'язка CHECK_ID + RECEIPT_UUID    }
+{  На будь-якій помилці: Rollback + ReleaseReservedCode(ACode.ID).              }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.SaveOfflineSaleTransaction(
+  ACheckID: Integer;
+  const ACashRegisterID, ACashierLogin, AShiftID: string;
+  const AReceiptUUID, AJsonString: string;
+  const ACode: TOfflineCode;
+  out AError: string): Boolean;
+begin
+  Result := False;
+  AError := '';
+
+  if ACheckID <= 0 then
+  begin
+    AError := 'Невірний CheckID';
+    Exit;
+  end;
+  if ACashRegisterID = '' then
+  begin
+    AError := 'Не вказано CASH_REGISTER_ID';
+    Exit;
+  end;
+  if ACode.ID <= 0 then
+  begin
+    AError := 'Не виділено offline-код (ACode.ID=0)';
+    Exit;
+  end;
+
+  try
+    SavPos;
+    ClsCon;
+    try
+      FDataModule.TrMag.StartTransaction;
+      try
+        // 2a) INSERT у чергу
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'INSERT INTO OFFLINE_RECEIPTS_QUEUE (' +
+          '  CHECK_ID, RECEIPT_UUID, RECEIPT_JSON, ERROR_MSG, ' +
+          '  STATUS, RETRY_COUNT, CREATED_AT, LAST_RETRY_AT, ' +
+          '  CASH_REGISTER_ID, CASHIER_LOGIN, SHIFT_ID, FISCAL_CODE) ' +
+          'VALUES (' +
+          '  :CHECK_ID, :RECEIPT_UUID, :RECEIPT_JSON, '''', ' +
+          '  :STATUS, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ' +
+          '  :CASH_REGISTER_ID, :CASHIER_LOGIN, :SHIFT_ID, :FISCAL_CODE)';
+        FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger     := ACheckID;
+        FDataModule.SQLQ.ParamByName('RECEIPT_UUID').AsString  := AReceiptUUID;
+        FDataModule.SQLQ.ParamByName('RECEIPT_JSON').AsString  := AJsonString;
+        FDataModule.SQLQ.ParamByName('STATUS').AsString        := FS_PENDING; // 'ОЧІКУЄ'
+        FDataModule.SQLQ.ParamByName('CASH_REGISTER_ID').AsString := ACashRegisterID;
+        FDataModule.SQLQ.ParamByName('CASHIER_LOGIN').AsString    := ACashierLogin;
+        FDataModule.SQLQ.ParamByName('SHIFT_ID').AsString         := AShiftID;
+        FDataModule.SQLQ.ParamByName('FISCAL_CODE').AsString      := ACode.FiscalCode;
+        FDataModule.SQLQ.ExecSQL;
+
+        // 2b) UPDATE CHEK → FISCAL_STATUS = ОЧІКУЄ
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'UPDATE CHEK SET FISCAL_STATUS = :STATUS WHERE KOD = :CHECK_ID';
+        FDataModule.SQLQ.ParamByName('STATUS').AsString   := FS_PENDING;
+        FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger := ACheckID;
+        FDataModule.SQLQ.ExecSQL;
+
+        // 2c) Прив'язка коду до чека (щоб CleanupOrphan не звільнив його)
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'UPDATE CHEK_OFFLINE_FISCAL_CODES SET ' +
+          '  CHECK_ID = :CHECK_ID, RECEIPT_UUID = :RECEIPT_UUID ' +
+          'WHERE ID = :ID';
+        FDataModule.SQLQ.ParamByName('CHECK_ID').AsInteger    := ACheckID;
+        FDataModule.SQLQ.ParamByName('RECEIPT_UUID').AsString := AReceiptUUID;
+        FDataModule.SQLQ.ParamByName('ID').AsInteger          := ACode.ID;
+        FDataModule.SQLQ.ExecSQL;
+
+        FDataModule.TrMag.Commit;
+        Result := True;
+      except
+        if FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    finally
+      OpnCon;
+      RstPos;
+    end;
+  except
+    on E: Exception do
+    begin
+      AError := 'Помилка транзакції: ' + E.Message;
+      Log('SaveOfflineSaleTransaction: ' + AError);
+      // Звільнити код негайно (не чекаючи CleanupOrphanOfflineCodes - 5 хв)
+      try
+        ReleaseReservedCode(ACode.ID);
+      except
+        // ignore
+      end;
+    end;
+  end;
+
+  if Result then
+    Log(Format('SaveOfflineSaleTransaction: OK CheckID=%d, Code=%s, UUID=%s, JSON=%d байт',
+      [ACheckID, ACode.FiscalCode, AReceiptUUID, Length(AJsonString)]));
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  ReleaseReservedCode — примусове звільнення коду (без очікування 5 хв).       }
+{═══════════════════════════════════════════════════════════════════════════════}
+procedure TChekDBManager.ReleaseReservedCode(AID: Integer);
+var
+  WasActive: Boolean;
+begin
+  if AID <= 0 then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'UPDATE CHEK_OFFLINE_FISCAL_CODES SET ' +
+        '  STATUS = 0, PURPOSE = NULL, RESERVED_AT = NULL, ' +
+        '  CHECK_ID = NULL, RECEIPT_UUID = NULL ' +
+        'WHERE ID = :ID AND STATUS = 1';
+      FDataModule.SQLQ.ParamByName('ID').AsInteger := AID;
+      FDataModule.SQLQ.ExecSQL;
+      Log(Format('ReleaseReservedCode: ID=%d звільнено', [AID]));
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        Log('ReleaseReservedCode: ' + E.Message);
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E2.3 — Локальні ліміти 36 год (сесія) / 168 год (місяць). ТЗ §3.5.          }
+{  Викликати ПЕРЕД offline-продажем і ПЕРЕД go-offline (E3).                   }
+{  НЕ викликати перед sync. При помилці читання — НЕ блокуємо.                  }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.CheckOfflineLimits(const ACR: string;
+  out AError: string): Boolean;
+var
+  IsOff, AccMin, WarnH, WarnM, CurSession, TotalMin: Integer;
+  StartedAt: TDateTime;
+  OffMonth: string;
+  WasActive: Boolean;
+begin
+  Result := True;
+  AError := '';
+  if ACR = '' then Exit;
+
+  WarnH := ReadWarnOfflineHours;   // clamp 1..36
+  WarnM := ReadWarnMonthlyHours;   // clamp 1..168
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'SELECT IS_OFFLINE, OFFLINE_STARTED_AT, ACCUMULATED_MINUTES_MONTH, ' +
+        '       OFFLINE_MONTH ' +
+        'FROM CHEK_OFFLINE_STATE WHERE CASH_REGISTER_ID = :CR';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.Open;
+      if FDataModule.SQLQ.EOF then
+      begin
+        FDataModule.SQLQ.Close;
+        Exit; // немає стану — не offline, ліміти не перевищені
+      end;
+
+      IsOff := FDataModule.SQLQ.FieldByName('IS_OFFLINE').AsInteger;
+      StartedAt := 0;
+      if not FDataModule.SQLQ.FieldByName('OFFLINE_STARTED_AT').IsNull then
+        StartedAt := FDataModule.SQLQ.FieldByName('OFFLINE_STARTED_AT').AsDateTime;
+      if not FDataModule.SQLQ.FieldByName('ACCUMULATED_MINUTES_MONTH').IsNull then
+        AccMin := FDataModule.SQLQ.FieldByName('ACCUMULATED_MINUTES_MONTH').AsInteger
+      else
+        AccMin := 0;
+      if FDataModule.SQLQ.FieldByName('OFFLINE_MONTH').IsNull then
+        OffMonth := ''
+      else
+        OffMonth := FDataModule.SQLQ.FieldByName('OFFLINE_MONTH').AsString;
+      FDataModule.SQLQ.Close;
+
+      // 36-годинний ліміт (поточна сесія)
+      if (IsOff = 1) and (StartedAt > 0) then
+      begin
+        CurSession := MinutesBetween(Now, StartedAt);
+        if CurSession >= WarnH * 60 then
+        begin
+          AError := Format(
+            'Перевищено ліміт безперервної офлайн-сесії: %d хв ≥ %d год.' + sLineBreak +
+            'Перейдіть в онлайн для синхронізації.',
+            [CurSession, WarnH]);
+          Exit(False);
+        end;
+      end;
+
+      // 168-годинний ліміт (місяць)
+      if OffMonth = FormatDateTime('yyyy-mm', Now) then
+      begin
+        TotalMin := AccMin;
+        if (IsOff = 1) and (StartedAt > 0) then
+          TotalMin := TotalMin + MinutesBetween(Now, StartedAt);
+        if TotalMin >= WarnM * 60 then
+        begin
+          AError := Format(
+            'Перевищено місячний ліміт офлайн: %d хв ≥ %d год.' + sLineBreak +
+            'Офлайн-продаж заблоковано до наступного місяця.',
+            [TotalMin, WarnM]);
+          Exit(False);
+        end;
+      end;
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        Log('CheckOfflineLimits: ' + E.Message);
+        // При помилці — не блокуємо (safe default)
+        Result := True;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E2.4 — Локальний offline-стан каси (читання з CHEK_OFFLINE_STATE).          }
+{  Повертає False, якщо стану немає, помилка, або IS_OFFLINE <> 1.               }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.IsOfflineState(const ACR: string): Boolean;
+var
+  WasActive: Boolean;
+begin
+  Result := False;
+  if ACR = '' then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'SELECT IS_OFFLINE FROM CHEK_OFFLINE_STATE WHERE CASH_REGISTER_ID = :CR';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.Open;
+      if not FDataModule.SQLQ.EOF then
+        Result := FDataModule.SQLQ.FieldByName('IS_OFFLINE').AsInteger = 1;
+      FDataModule.SQLQ.Close;
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        Log('IsOfflineState: ' + E.Message);
+        Result := False;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.1 — UpdateOfflineStateStart: перевести касу в offline-стан.               }
+{  UPSERT через окремі UPDATE/INSERT. Якщо рядка немає — INSERT з IS_OFFLINE=1.  }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.UpdateOfflineStateStart(const ACR: string;
+  out AError: string): Boolean;
+var
+  Affected: Integer;
+  OffMonth: string;
+begin
+  Result := False;
+  AError := '';
+  if ACR = '' then
+  begin
+    AError := 'CASH_REGISTER_ID порожній';
+    Exit;
+  end;
+
+  OffMonth := FormatDateTime('yyyy-mm', Now);
+
+  SavPos;
+  ClsCon;
+  try
+    try
+      FDataModule.TrMag.StartTransaction;
+      try
+        // 1) UPDATE, якщо рядок є
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'UPDATE CHEK_OFFLINE_STATE SET ' +
+          '  IS_OFFLINE = 1, ' +
+          '  OFFLINE_STARTED_AT = CURRENT_TIMESTAMP, ' +
+          '  OFFLINE_MONTH = :MON ' +
+          'WHERE CASH_REGISTER_ID = :CR';
+        FDataModule.SQLQ.ParamByName('MON').AsString := OffMonth;
+        FDataModule.SQLQ.ParamByName('CR').AsString  := ACR;
+        FDataModule.SQLQ.ExecSQL;
+        Affected := FDataModule.SQLQ.RowsAffected;
+
+        // 2) INSERT, якщо не було
+        if Affected = 0 then
+        begin
+          FDataModule.SQLQ.Close;
+          FDataModule.SQLQ.SQL.Text :=
+            'INSERT INTO CHEK_OFFLINE_STATE (' +
+            '  CASH_REGISTER_ID, IS_OFFLINE, OFFLINE_STARTED_AT, ' +
+            '  ACCUMULATED_MINUTES_MONTH, OFFLINE_MONTH, LAST_OFFLINE_SEQ_NUMBER) ' +
+            'VALUES (:CR, 1, CURRENT_TIMESTAMP, 0, :MON, 0)';
+          FDataModule.SQLQ.ParamByName('CR').AsString  := ACR;
+          FDataModule.SQLQ.ParamByName('MON').AsString := OffMonth;
+          FDataModule.SQLQ.ExecSQL;
+          Log('UpdateOfflineStateStart: INSERT новий рядок для CR=' + Copy(ACR, 1, 8) + '...');
+        end
+        else
+          Log('UpdateOfflineStateStart: UPDATE існуючий рядок для CR=' + Copy(ACR, 1, 8) + '...');
+
+        FDataModule.TrMag.Commit;
+        Result := True;
+      except
+        if FDataModule.TrMag.Active then FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    except
+      on E: Exception do
+      begin
+        AError := 'UpdateOfflineStateStart: ' + E.Message;
+        Log(AError);
+      end;
+    end;
+  finally
+    OpnCon;
+    RstPos;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.2 — UpdateOfflineStateStop: повернути касу в online-стан (після go-online). }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.UpdateOfflineStateStop(const ACR: string): Boolean;
+begin
+  Result := False;
+  if ACR = '' then Exit;
+
+  SavPos;
+  ClsCon;
+  try
+    try
+      FDataModule.TrMag.StartTransaction;
+      try
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'UPDATE CHEK_OFFLINE_STATE SET ' +
+          '  IS_OFFLINE = 0, ' +
+          '  OFFLINE_STARTED_AT = NULL, ' +
+          '  LAST_ONLINE_AT = CURRENT_TIMESTAMP, ' +
+          '  LAST_OFFLINE_SEQ_NUMBER = 0 ' +
+          'WHERE CASH_REGISTER_ID = :CR';
+        FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+        FDataModule.SQLQ.ExecSQL;
+        FDataModule.TrMag.Commit;
+        Result := True;
+        Log('UpdateOfflineStateStop: IS_OFFLINE=0, seq=0 для CR=' + Copy(ACR, 1, 8) + '...');
+      except
+        if FDataModule.TrMag.Active then FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    except
+      on E: Exception do
+        Log('UpdateOfflineStateStop: ' + E.Message);
+    end;
+  finally
+    OpnCon;
+    RstPos;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.1 — CacheBalance: зберегти поточний баланс з API (гривні з копійками).   }
+{  Оновлює BALANCE_CACHE, CASH_SALES_CACHE, CARD_SALES_CACHE.                  }
+{═══════════════════════════════════════════════════════════════════════════════}
+procedure TChekDBManager.CacheBalance(const ACR: string;
+  ABalance, ACashSales, ACardSales: Double);
+begin
+  if ACR = '' then Exit;
+
+  SavPos;
+  ClsCon;
+  try
+    try
+      FDataModule.TrMag.StartTransaction;
+      try
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'UPDATE CHEK_OFFLINE_STATE SET ' +
+          '  BALANCE_CACHE = :BAL, ' +
+          '  CASH_SALES_CACHE = :CASH, ' +
+          '  CARD_SALES_CACHE = :CARD ' +
+          'WHERE CASH_REGISTER_ID = :CR';
+        FDataModule.SQLQ.ParamByName('BAL').AsFloat  := ABalance;
+        FDataModule.SQLQ.ParamByName('CASH').AsFloat := ACashSales;
+        FDataModule.SQLQ.ParamByName('CARD').AsFloat := ACardSales;
+        FDataModule.SQLQ.ParamByName('CR').AsString  := ACR;
+        FDataModule.SQLQ.ExecSQL;
+        FDataModule.TrMag.Commit;
+        Log(Format('CacheBalance: BAL=%.2f CASH=%.2f CARD=%.2f',
+          [ABalance, ACashSales, ACardSales]));
+      except
+        if FDataModule.TrMag.Active then FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    except
+      on E: Exception do
+        Log('CacheBalance: ' + E.Message);
+    end;
+  finally
+    OpnCon;
+    RstPos;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.1 — LoadPendingQueue: читає чергу для каси у масив.                     }
+{  Не тримає курсор між викликами. Тільки STATUS IN ('ОЧІКУЄ','ВІДПРАВЛЕНО').    }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.LoadPendingQueue(const ACR: string): TQueueItemArray;
+var
+  WasActive: Boolean;
+begin
+  SetLength(Result, 0);
+  if ACR = '' then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'SELECT ID, CHECK_ID, RECEIPT_UUID, RECEIPT_JSON, FISCAL_CODE, ' +
+        '       STATUS, LAST_RETRY_AT ' +
+        'FROM OFFLINE_RECEIPTS_QUEUE ' +
+        'WHERE CASH_REGISTER_ID = :CR ' +
+        '  AND STATUS IN (:S1, :S2) ' +
+        'ORDER BY ID';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.ParamByName('S1').AsString := QS_PENDING;
+      FDataModule.SQLQ.ParamByName('S2').AsString := QS_SENT;
+      FDataModule.SQLQ.Open;
+
+      while not FDataModule.SQLQ.EOF do
+      begin
+        SetLength(Result, Length(Result) + 1);
+        with Result[High(Result)] do
+        begin
+          ID          := FDataModule.SQLQ.FieldByName('ID').AsInteger;
+          CheckID     := FDataModule.SQLQ.FieldByName('CHECK_ID').AsInteger;
+          if not FDataModule.SQLQ.FieldByName('RECEIPT_UUID').IsNull then
+            ReceiptUUID := FDataModule.SQLQ.FieldByName('RECEIPT_UUID').AsString
+          else
+            ReceiptUUID := '';
+          ReceiptJSON := FDataModule.SQLQ.FieldByName('RECEIPT_JSON').AsString;
+          if not FDataModule.SQLQ.FieldByName('FISCAL_CODE').IsNull then
+            FIScalCode := FDataModule.SQLQ.FieldByName('FISCAL_CODE').AsString
+          else
+            FIScalCode := '';
+          Status := FDataModule.SQLQ.FieldByName('STATUS').AsString;
+          if not FDataModule.SQLQ.FieldByName('LAST_RETRY_AT').IsNull then
+            LastRetryAt := FDataModule.SQLQ.FieldByName('LAST_RETRY_AT').AsDateTime
+          else
+            LastRetryAt := 0;
+        end;
+        FDataModule.SQLQ.Next;
+      end;
+      FDataModule.SQLQ.Close;
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        Log('LoadPendingQueue: ' + E.Message);
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+
+  Log(Format('LoadPendingQueue: %d pending (CR=%s)',
+    [Length(Result), Copy(ACR, 1, 8) + '...']));
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.1 — SetQueueStatus: оновлює статус одного рядка черги.                  }
+{═══════════════════════════════════════════════════════════════════════════════}
+procedure TChekDBManager.SetQueueStatus(AQueueID: Integer;
+  const AStatus, AError: string; ARetryDelta: Integer = 0);
+var
+  WasActive: Boolean;
+begin
+  if AQueueID <= 0 then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'UPDATE OFFLINE_RECEIPTS_QUEUE SET ' +
+        '  STATUS = :ST, ' +
+        '  ERROR_MSG = :ERR, ' +
+        '  LAST_RETRY_AT = CURRENT_TIMESTAMP, ' +
+        '  RETRY_COUNT = COALESCE(RETRY_COUNT, 0) + :DELTA ' +
+        'WHERE ID = :ID';
+      FDataModule.SQLQ.ParamByName('ST').AsString    := AStatus;
+      FDataModule.SQLQ.ParamByName('ERR').AsString   := Copy(AError, 1, 500);
+      FDataModule.SQLQ.ParamByName('DELTA').AsInteger := ARetryDelta;
+      FDataModule.SQLQ.ParamByName('ID').AsInteger   := AQueueID;
+      FDataModule.SQLQ.ExecSQL;
+
+      Log(Format('SetQueueStatus: ID=%d → %s (delta=%d)',
+        [AQueueID, AStatus, ARetryDelta]));
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        Log('SetQueueStatus: ' + E.Message);
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.1 — MarkSynced: атомарно позначає чек як синхронізований.               }
+{  Оновлює три таблиці в одній транзакції.                                      }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.MarkSynced(AQueueID, ACheckID: Integer;
+  const AFiscalCode, AFiscalID, AResponseJSON: string;
+  out AError: string): Boolean;
+
+begin
+  Result := False;
+  AError := '';
+  if AQueueID <= 0 then
+  begin
+    AError := 'AQueueID=0';
+    Exit;
+  end;
+
+  SavPos;
+  ClsCon;
+  try
+    try
+      FDataModule.TrMag.StartTransaction;
+      try
+        // 1) Черга — СИНХРОНІЗОВАНО
+        FDataModule.SQLQ.Close;
+        FDataModule.SQLQ.SQL.Text :=
+          'UPDATE OFFLINE_RECEIPTS_QUEUE SET ' +
+          '  STATUS = :ST, ' +
+          '  SYNCED_AT = CURRENT_TIMESTAMP, ' +
+          '  FISCAL_RESPONSE = :RESP, ' +
+          '  ERROR_MSG = '''' ' +
+          'WHERE ID = :ID';
+        FDataModule.SQLQ.ParamByName('ST').AsString   := QS_SYNCED;
+        FDataModule.SQLQ.ParamByName('RESP').AsString := Copy(AResponseJSON, 1, 500);
+        FDataModule.SQLQ.ParamByName('ID').AsInteger  := AQueueID;
+        FDataModule.SQLQ.ExecSQL;
+
+        // 2) CHEK — ФІСКАЛІЗОВАНО
+        if ACheckID > 0 then
+        begin
+          FDataModule.SQLQ.Close;
+          FDataModule.SQLQ.SQL.Text :=
+            'UPDATE CHEK SET ' +
+            '  FISCAL_STATUS = :ST, ' +
+            '  FISCAL_CODE = :FC, ' +
+            '  FISCAL_ID = :FID, ' +
+            '  FISCAL_DATE = CURRENT_TIMESTAMP ' +
+            'WHERE KOD = :ID';
+          FDataModule.SQLQ.ParamByName('ST').AsString  := FS_DONE;
+          FDataModule.SQLQ.ParamByName('FC').AsString  := AFiscalCode;
+          FDataModule.SQLQ.ParamByName('FID').AsString := AFiscalID;
+          FDataModule.SQLQ.ParamByName('ID').AsInteger := ACheckID;
+          FDataModule.SQLQ.ExecSQL;
+        end;
+
+        // 3) Код — USED (знаходимо за FISCAL_CODE)
+        if AFiscalCode <> '' then
+        begin
+          FDataModule.SQLQ.Close;
+          FDataModule.SQLQ.SQL.Text :=
+            'UPDATE CHEK_OFFLINE_FISCAL_CODES SET ' +
+            '  STATUS = 2, USED_AT = CURRENT_TIMESTAMP ' +
+            'WHERE FISCAL_CODE = :FC';
+          FDataModule.SQLQ.ParamByName('FC').AsString := AFiscalCode;
+          FDataModule.SQLQ.ExecSQL;
+        end;
+
+        FDataModule.TrMag.Commit;
+        Result := True;
+        Log(Format('MarkSynced: QueueID=%d CheckID=%d FC=%s → СИНХРОНІЗОВАНО',
+          [AQueueID, ACheckID, AFiscalCode]));
+      except
+        if FDataModule.TrMag.Active then FDataModule.TrMag.Rollback;
+        raise;
+      end;
+    except
+      on E: Exception do
+      begin
+        AError := 'MarkSynced: ' + E.Message;
+        Log(AError);
+      end;
+    end;
+  finally
+    OpnCon;
+    RstPos;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.2 — TryAcquireLock: захопити lock для sync.                             }
+{  Firebird не приймає параметр у DATEADD → обчислюємо :threshold у Pascal.     }
+{  RowsAffected > 0 → lock наш. Інакше — хтось інший тримає.                    }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.TryAcquireLock(const ACR, AOwner: string;
+  ATimeoutMin: Integer): Boolean;
+var
+  Threshold: TDateTime;
+  WasActive: Boolean;
+begin
+  Result := False;
+  if (ACR = '') or (AOwner = '') then Exit;
+  if ATimeoutMin < 5  then ATimeoutMin := 5;
+  if ATimeoutMin > 120 then ATimeoutMin := 120;
+
+  Threshold := Now - (ATimeoutMin / MinsPerDay);
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'UPDATE CHEK_OFFLINE_STATE SET ' +
+        '  SYNC_LOCK_OWNER = :OWNER, ' +
+        '  SYNC_LOCKED_AT = CURRENT_TIMESTAMP ' +
+        'WHERE CASH_REGISTER_ID = :CR ' +
+        '  AND (SYNC_LOCK_OWNER IS NULL OR SYNC_LOCKED_AT < :THRESHOLD)';
+      FDataModule.SQLQ.ParamByName('OWNER').AsString := AOwner;
+      FDataModule.SQLQ.ParamByName('CR').AsString    := ACR;
+      FDataModule.SQLQ.ParamByName('THRESHOLD').AsDateTime := Threshold;
+      FDataModule.SQLQ.ExecSQL;
+      Result := FDataModule.SQLQ.RowsAffected > 0;
+
+      if Result then
+        Log('TryAcquireLock: ✅ отримано (owner=' + Copy(AOwner, 1, 16) +
+            '..., timeout=' + IntToStr(ATimeoutMin) + ' хв)')
+      else
+        Log('TryAcquireLock: ❌ зайнято іншим власником');
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        Log('TryAcquireLock: ' + E.Message);
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.2 — RefreshLock: heartbeat, оновлює SYNC_LOCKED_AT.                     }
+{  Викликати з thread'а кожні ~2 хв (ТЗ §3.8).                                 }
+{═══════════════════════════════════════════════════════════════════════════════}
+procedure TChekDBManager.RefreshLock(const ACR, AOwner: string);
+var
+  WasActive: Boolean;
+begin
+  if (ACR = '') or (AOwner = '') then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'UPDATE CHEK_OFFLINE_STATE SET ' +
+        '  SYNC_LOCKED_AT = CURRENT_TIMESTAMP ' +
+        'WHERE CASH_REGISTER_ID = :CR AND SYNC_LOCK_OWNER = :OWNER';
+      FDataModule.SQLQ.ParamByName('CR').AsString    := ACR;
+      FDataModule.SQLQ.ParamByName('OWNER').AsString := AOwner;
+      FDataModule.SQLQ.ExecSQL;
+      // Не логуємо кожен heartbeat (буде шумно). Можна увімкнути для дебагу.
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        Log('RefreshLock: ' + E.Message);
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.2 — IsSyncLockOwner: чи ми досі власник lock.                            }
+{  Викликати ПЕРЕД кожним POST у thread'і — якщо lock втрачено, зупиняємось.    }
+{═══════════════════════════════════════════════════════════════════════════════}
+function TChekDBManager.IsSyncLockOwner(const ACR, AOwner: string): Boolean;
+var
+  WasActive: Boolean;
+begin
+  Result := False;
+  if (ACR = '') or (AOwner = '') then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'SELECT SYNC_LOCK_OWNER FROM CHEK_OFFLINE_STATE ' +
+        'WHERE CASH_REGISTER_ID = :CR';
+      FDataModule.SQLQ.ParamByName('CR').AsString := ACR;
+      FDataModule.SQLQ.Open;
+      if not FDataModule.SQLQ.EOF then
+      begin
+        if not FDataModule.SQLQ.FieldByName('SYNC_LOCK_OWNER').IsNull then
+          Result := FDataModule.SQLQ.FieldByName('SYNC_LOCK_OWNER').AsString = AOwner;
+      end;
+      FDataModule.SQLQ.Close;
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        Log('IsSyncLockOwner: ' + E.Message);
+        Result := False;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
+{═══════════════════════════════════════════════════════════════════════════════}
+{  E3.3.2 — ReleaseLock: звільнити lock (у finally thread'а).                    }
+{═══════════════════════════════════════════════════════════════════════════════}
+procedure TChekDBManager.ReleaseLock(const ACR, AOwner: string);
+var
+  WasActive: Boolean;
+begin
+  if (ACR = '') or (AOwner = '') then Exit;
+
+  WasActive := FDataModule.TrMag.Active;
+  if not WasActive then
+    FDataModule.TrMag.StartTransaction;
+  try
+    try
+      FDataModule.SQLQ.Close;
+      FDataModule.SQLQ.SQL.Text :=
+        'UPDATE CHEK_OFFLINE_STATE SET ' +
+        '  SYNC_LOCK_OWNER = NULL, SYNC_LOCKED_AT = NULL ' +
+        'WHERE CASH_REGISTER_ID = :CR AND SYNC_LOCK_OWNER = :OWNER';
+      FDataModule.SQLQ.ParamByName('CR').AsString    := ACR;
+      FDataModule.SQLQ.ParamByName('OWNER').AsString := AOwner;
+      FDataModule.SQLQ.ExecSQL;
+      if FDataModule.SQLQ.RowsAffected > 0 then
+        Log('ReleaseLock: ✅ lock звільнено (owner=' + Copy(AOwner, 1, 16) + '...)');
+    except
+      on E: Exception do
+      begin
+        FDataModule.SQLQ.Close;
+        if not WasActive and FDataModule.TrMag.Active then
+          FDataModule.TrMag.Rollback;
+        Log('ReleaseLock: ' + E.Message);
+        raise;
+      end;
+    end;
+  finally
+    if not WasActive and FDataModule.TrMag.Active then
+      FDataModule.TrMag.Commit;
+  end;
+end;
+
 
 end.
